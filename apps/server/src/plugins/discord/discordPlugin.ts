@@ -510,7 +510,7 @@ export class DiscordPlugin implements GiadaPlugin {
       replyTo: context.replyTo,
       recentMessages: context.recentMessages,
       images: context.images,
-      mayStaySilent: listeningChannel && !addressed,
+      mayStaySilent: false,
       reactionTargetMessageIds: context.reactionTargetMessageIds,
       addReaction: (messageId, emoji) => this.addReactionToContextMessage(message, context.reactionTargetMessageIds, messageId, emoji),
       sendGif: (url, caption) => this.sendGifToMessageChannel(message, url, caption),

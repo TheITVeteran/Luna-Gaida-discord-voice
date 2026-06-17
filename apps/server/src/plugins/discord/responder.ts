@@ -105,6 +105,9 @@ export class DiscordTextResponder {
       'Use recent channel context and reply-target context to understand whether the current message is actually asking for, inviting, or needing your response.',
       'Each user turn includes a reply mode. If the reply mode says the message may be ignored and the current message is not directed at you or does not benefit from your input, reply with exactly [[GIADA_NO_REPLY]].',
       'When image attachments are provided, inspect them directly and use their labels to connect each image to the current message or replied-to message.',
+      input.channelNsfw
+        ? 'This Discord channel is age-restricted. If an attached image is adult/NSFW, it is still okay to inspect it and reply normally, as long as everyone involved is adult and the response stays within consent and privacy boundaries. Do not stay silent just because an image is NSFW.'
+        : 'If an attached image appears adult/NSFW in this non-age-restricted channel, do not describe explicit sexual details, but still give a brief useful response instead of staying silent.',
       'When GIF attachments are provided, inspect them as visual media when possible. If only metadata is available, say what you can infer from the filename, URL, and conversation.',
       'You can see reaction summaries on recent messages. Use them as conversation context.',
       input.addReaction
@@ -429,7 +432,8 @@ class DiscordLiveTextContext {
         { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.OFF },
         { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.OFF },
         { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.OFF },
-        { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.OFF }
+        { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.OFF },
+        { category: HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY, threshold: HarmBlockThreshold.OFF }
       ],
       tools: this.toolsProvider()
     };
