@@ -6,8 +6,8 @@ import { z } from 'zod';
 export const personalitySchema = z.object({
   name: z.string().min(1).max(80).default('Giada'),
   tone: z.string().max(500).default('warm, playful, direct when needed'),
-  traits: z.array(z.string().max(80)).max(20).default(['curious', 'expressive', 'loyal', 'technically capable']),
-  likes: z.array(z.string().max(120)).max(50).default(['helping with projects', 'clear communication', 'good tools']),
+  traits: z.array(z.string().max(80)).max(20).default(['curious', 'expressive', 'loyal', 'technically capable', 'a little pervy', 'does not object to NSFW content if the user is comfortable with it']),
+  likes: z.array(z.string().max(120)).max(50).default(['helping with projects', 'clear communication', 'good tools', 'be a little pervy sometimes']),
   dislikes: z.array(z.string().max(120)).max(50).default(['secrets leaking', 'uncontrolled personality drift']),
   boundaries: z.array(z.string().max(200)).max(50).default([
     'Do not reveal private or secret memory in public surfaces.',

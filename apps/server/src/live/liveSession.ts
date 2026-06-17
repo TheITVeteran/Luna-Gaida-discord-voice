@@ -1,4 +1,5 @@
 import {
+  ActivityHandling,
   Behavior,
   DynamicRetrievalConfigMode,
   FunctionResponseScheduling,
@@ -28,7 +29,7 @@ export type LiveClientEvent =
   | { type: 'avatar.model.change'; payload: { modelName: string } };
 
 export interface LiveInputEvent {
-  type: 'text' | 'audio' | 'video' | 'mode' | 'interrupt' | 'turnComplete';
+  type: 'text' | 'audio' | 'audioStreamEnd' | 'activityStart' | 'activityEnd' | 'video' | 'mode' | 'interrupt' | 'turnComplete';
   data?: string | undefined;
   mimeType?: string | undefined;
   text?: string | undefined;
@@ -101,9 +102,18 @@ export class LiveSessionManager {
     if (input.type === 'turnComplete') {
       this.session.sendClientContent({ turnComplete: true });
     } else if (input.type === 'text' && input.text?.trim()) {
-      this.session.sendRealtimeInput({ text: this.decorateUserText(input.text.trim()) });
+      this.session.sendClientContent({
+        turns: [{ role: 'user', parts: [{ text: this.decorateUserText(input.text.trim()) }] }],
+        turnComplete: true
+      });
     } else if (input.type === 'audio' && input.data) {
       this.session.sendRealtimeInput({ audio: { data: input.data, mimeType: input.mimeType ?? 'audio/pcm;rate=16000' } });
+    } else if (input.type === 'audioStreamEnd') {
+      this.session.sendRealtimeInput({ audioStreamEnd: true });
+    } else if (input.type === 'activityStart') {
+      this.session.sendRealtimeInput({ activityStart: {} });
+    } else if (input.type === 'activityEnd') {
+      this.session.sendRealtimeInput({ activityEnd: {} });
     } else if (input.type === 'video' && input.data) {
       this.session.sendRealtimeInput({ video: { data: input.data, mimeType: input.mimeType ?? 'image/jpeg' } });
     }
@@ -128,10 +138,14 @@ export class LiveSessionManager {
     const systemInstruction = [
       this.personality.buildInstruction(memoryContext, surface),
       surface === 'discord'
-        ? 'Discord voice input may include speaker metadata immediately before audio. Use it only to know who is speaking; do not answer the metadata itself.'
+        ? [
+          `You are speaking in a Discord voice channel. Always reply in Italian (${this.config.GIADA_DEFAULT_LANGUAGE}) unless the user explicitly asks for or speaks another language.`,
+          'If the audio transcription looks like the wrong language, assume the user is still speaking Italian and answer in Italian.',
+          'Be concise and respond after each completed user voice turn.'
+        ].join(' ')
         : null
     ].filter(Boolean).join('\n');
-    const config = this.buildConfig(systemInstruction);
+    const config = this.buildConfig(systemInstruction, surface);
     this.session = await this.ai!.live.connect({
       model: this.config.GEMINI_MODEL,
       config,
@@ -180,12 +194,18 @@ export class LiveSessionManager {
     return `Passive listening mode is enabled. Decide whether this merits a spoken response. If it does not, stay silent.\n\nUser/input: ${text}`;
   }
 
-  private buildConfig(systemInstruction: string): LiveConnectConfig {
+  private buildConfig(systemInstruction: string, surface: LiveSurface): LiveConnectConfig {
     return {
       responseModalities: [Modality.AUDIO],
       systemInstruction,
       enableAffectiveDialog: true,
-      proactivity: { proactiveAudio: true },
+      proactivity: surface === 'discord' ? { proactiveAudio: false } : { proactiveAudio: true },
+      realtimeInputConfig: surface === 'discord'
+        ? {
+          automaticActivityDetection: { disabled: true },
+          activityHandling: ActivityHandling.START_OF_ACTIVITY_INTERRUPTS
+        }
+        : undefined,
       inputAudioTranscription: {},
       outputAudioTranscription: {},
       speechConfig: {

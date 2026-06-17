@@ -14,7 +14,14 @@ import {
   type Message,
   type VoiceState
 } from 'discord.js';
-import { VoiceConnectionStatus, joinVoiceChannel, getVoiceConnection, type DiscordGatewayAdapterCreator } from '@discordjs/voice';
+import {
+  VoiceConnectionStatus,
+  joinVoiceChannel,
+  getVoiceConnection,
+  type DiscordGatewayAdapterCreator,
+  type DiscordGatewayAdapterImplementerMethods,
+  type DiscordGatewayAdapterLibraryMethods
+} from '@discordjs/voice';
 import { createPublicKey, verify } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { AppConfig } from '../../config/env.js';
@@ -37,7 +44,7 @@ const MAX_DISCORD_IMAGE_ATTACHMENTS = 4;
 const MAX_DISCORD_IMAGE_BYTES = 8 * 1024 * 1024;
 const DISCORD_COMMAND_OWNER_USER_ID = '573903151472836609';
 const VOICE_WATCH_RECONCILE_MS = 15_000;
-const VOICE_READY_TIMEOUT_MS = 12_000;
+const VOICE_READY_TIMEOUT_MS = 30_000;
 const VOICE_REJOIN_DELAY_MS = 3_000;
 
 const giadaCommand = new SlashCommandBuilder()
@@ -143,9 +150,31 @@ interface DiscordHttpInteraction {
 interface DiscordVoiceGatewayDiagnostics {
   voiceStateUpdates: number;
   voiceServerUpdates: number;
+  adapterVoiceStateUpdates: number;
+  adapterVoiceServerUpdates: number;
   lastVoiceStateUpdateAt: string | null;
   lastVoiceServerUpdateAt: string | null;
+  lastAdapterVoiceStateUpdateAt: string | null;
+  lastAdapterVoiceServerUpdateAt: string | null;
   lastBotVoiceChannelId: string | null;
+  lastBotVoiceSessionId: string | null;
+}
+
+interface DiscordVoiceConnectionDiagnostics {
+  stateChanges: number;
+  lastStateChangeAt: string | null;
+  lastOldStatus: string | null;
+  lastNewStatus: string | null;
+  lastReason: number | null;
+  lastCloseCode: number | null;
+  lastError: string | null;
+  lastDebug: string | null;
+}
+
+interface ActiveVoiceAdapter {
+  methods: DiscordGatewayAdapterLibraryMethods;
+  lastVoiceStateKey: string | null;
+  lastVoiceServerKey: string | null;
 }
 
 export class DiscordPlugin implements GiadaPlugin {
@@ -159,6 +188,9 @@ export class DiscordPlugin implements GiadaPlugin {
   private readonly voiceRejoinTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly voiceReadyReconnectAttempts = new Map<string, number>();
   private readonly voiceGatewayDiagnostics = new Map<string, DiscordVoiceGatewayDiagnostics>();
+  private readonly voiceConnectionDiagnostics = new Map<string, DiscordVoiceConnectionDiagnostics>();
+  private readonly diagnosedVoiceConnections = new WeakSet<ReturnType<typeof joinVoiceChannel>>();
+  private readonly activeVoiceAdapters = new Map<string, ActiveVoiceAdapter>();
 
   constructor(
     private readonly config: AppConfig,
@@ -188,7 +220,7 @@ export class DiscordPlugin implements GiadaPlugin {
     this.client.on(Events.MessageCreate, (message) => {
       void this.handleMessage(message);
     });
-    this.client.on('raw', (packet: { t?: string; d?: { id?: string; type?: number; data?: { name?: string }; guild_id?: string; user_id?: string; channel_id?: string | null } }) => {
+    this.client.on('raw', (packet: { t?: string; d?: { id?: string; type?: number; data?: { name?: string }; guild_id?: string; user_id?: string; channel_id?: string | null; session_id?: string | null } }) => {
       if (packet.t === 'INTERACTION_CREATE') {
         logger.info('Received raw Discord INTERACTION_CREATE packet', {
           id: packet.d?.id,
@@ -205,6 +237,8 @@ export class DiscordPlugin implements GiadaPlugin {
         diagnostics.lastVoiceStateUpdateAt = new Date().toISOString();
         if (packet.d.user_id === this.client?.user?.id) {
           diagnostics.lastBotVoiceChannelId = packet.d.channel_id ?? null;
+          diagnostics.lastBotVoiceSessionId = packet.d.session_id ?? null;
+          this.forwardRawVoiceStateUpdate(packet.d);
         }
         return;
       }
@@ -213,6 +247,7 @@ export class DiscordPlugin implements GiadaPlugin {
         const diagnostics = this.getVoiceGatewayDiagnostics(packet.d.guild_id);
         diagnostics.voiceServerUpdates += 1;
         diagnostics.lastVoiceServerUpdateAt = new Date().toISOString();
+        this.forwardRawVoiceServerUpdate(packet.d);
       }
     });
     this.client.on(Events.InteractionCreate, (interaction) => {
@@ -330,7 +365,8 @@ export class DiscordPlugin implements GiadaPlugin {
             readyTimerActive: this.voiceReadyTimers.has(guild.id),
             rejoinScheduled: this.voiceRejoinTimers.has(guild.id),
             readyReconnectAttempts: this.voiceReadyReconnectAttempts.get(guild.id) ?? 0,
-            gateway: this.getVoiceGatewayDiagnostics(guild.id)
+            gateway: this.getVoiceGatewayDiagnostics(guild.id),
+            connection: this.getVoiceConnectionDiagnostics(guild.id)
           };
         })
         .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry)),
@@ -549,7 +585,7 @@ export class DiscordPlugin implements GiadaPlugin {
       }
 
       if (mode === 'join') {
-        this.joinVoice(interaction.guildId, voiceChannelId);
+        await this.joinVoice(interaction.guildId, voiceChannelId);
         await this.replyInteraction(interaction, 'Joined voice. I will listen and reply with voice while connected.');
         return;
       }
@@ -655,7 +691,7 @@ export class DiscordPlugin implements GiadaPlugin {
       }
 
       if (mode === 'join') {
-        this.joinVoice(payload.guild_id, voiceChannelId);
+        await this.joinVoice(payload.guild_id, voiceChannelId);
         await this.updateHttpInteraction(payload, 'Joined voice. I will listen and reply with voice while connected.');
         return;
       }
@@ -778,7 +814,7 @@ export class DiscordPlugin implements GiadaPlugin {
     if (humanMembers <= 0) {
       return;
     }
-    this.joinVoice(guildId, channelId);
+    await this.joinVoice(guildId, channelId);
   }
 
   private leaveWatchedVoiceIfEmpty(guildId: string, channelId: string) {
@@ -794,7 +830,7 @@ export class DiscordPlugin implements GiadaPlugin {
     connection.destroy();
   }
 
-  private joinVoice(guildId: string, channelId: string) {
+  private async joinVoice(guildId: string, channelId: string) {
     const guild = this.client?.guilds.cache.get(guildId);
     if (!guild) {
       logger.warn('Cannot join Discord voice channel because guild is not cached', { guildId, channelId });
@@ -805,11 +841,20 @@ export class DiscordPlugin implements GiadaPlugin {
       logger.warn('Cannot join Discord voice channel because bot user is not ready', { guildId, channelId });
       return;
     }
+    await guild.members.fetchMe().catch((error) => {
+      logger.warn('Could not fetch Discord bot guild member before joining voice', {
+        guildId,
+        channelId,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    });
+    this.warnIfVoicePermissionsAreMissing(guildId, channelId, botUserId);
     const existingConnection = getVoiceConnection(guildId);
     if (existingConnection?.joinConfig.channelId === channelId) {
       if (existingConnection.state.status === VoiceConnectionStatus.Destroyed) {
         this.destroyVoiceBridge(guildId);
       } else {
+        this.attachVoiceConnectionDiagnostics(guildId, channelId, existingConnection);
         this.getVoiceBridge(guildId, botUserId).attach(existingConnection, channelId);
         this.watchVoiceReady(guildId, channelId, existingConnection);
         this.unsuppressStageVoiceIfNeeded(guildId, channelId);
@@ -822,10 +867,12 @@ export class DiscordPlugin implements GiadaPlugin {
     const connection = joinVoiceChannel({
       channelId,
       guildId,
-      adapterCreator: guild.voiceAdapterCreator as unknown as DiscordGatewayAdapterCreator,
+      adapterCreator: this.createVoiceAdapterCreator(guild.voiceAdapterCreator as unknown as DiscordGatewayAdapterCreator, guildId),
       selfDeaf: false,
-      selfMute: false
+      selfMute: false,
+      debug: true
     });
+    this.attachVoiceConnectionDiagnostics(guildId, channelId, connection);
     this.getVoiceBridge(guildId, botUserId).attach(connection, channelId);
     this.watchVoiceReady(guildId, channelId, connection);
     this.unsuppressStageVoiceIfNeeded(guildId, channelId);
@@ -835,6 +882,16 @@ export class DiscordPlugin implements GiadaPlugin {
     if (this.voiceReadyTimers.has(guildId)) {
       return;
     }
+    if (connection.state.status === VoiceConnectionStatus.Ready || connection.state.status === VoiceConnectionStatus.Destroyed) {
+      return;
+    }
+    const clearReadyTimer = () => {
+      const activeTimer = this.voiceReadyTimers.get(guildId);
+      if (activeTimer) {
+        clearTimeout(activeTimer);
+        this.voiceReadyTimers.delete(guildId);
+      }
+    };
     const timer = setTimeout(() => {
       this.voiceReadyTimers.delete(guildId);
       if (connection.state.status === VoiceConnectionStatus.Ready || connection.state.status === VoiceConnectionStatus.Destroyed) {
@@ -846,7 +903,8 @@ export class DiscordPlugin implements GiadaPlugin {
       logger.warn('Discord voice connection did not become ready; reconnecting', {
         guildId,
         channelId,
-        status: connection.state.status
+        status: connection.state.status,
+        gateway: this.getVoiceGatewayDiagnostics(guildId)
       });
       this.voiceReadyReconnectAttempts.set(guildId, (this.voiceReadyReconnectAttempts.get(guildId) ?? 0) + 1);
       this.destroyVoiceBridge(guildId);
@@ -854,18 +912,11 @@ export class DiscordPlugin implements GiadaPlugin {
       this.scheduleVoiceRejoin(guildId, channelId, VOICE_REJOIN_DELAY_MS);
     }, VOICE_READY_TIMEOUT_MS);
     this.voiceReadyTimers.set(guildId, timer);
-    connection.once(VoiceConnectionStatus.Ready, () => {
-      const activeTimer = this.voiceReadyTimers.get(guildId);
-      if (activeTimer) {
-        clearTimeout(activeTimer);
-        this.voiceReadyTimers.delete(guildId);
-      }
-    });
-    connection.once(VoiceConnectionStatus.Destroyed, () => {
-      const activeTimer = this.voiceReadyTimers.get(guildId);
-      if (activeTimer) {
-        clearTimeout(activeTimer);
-        this.voiceReadyTimers.delete(guildId);
+    connection.once(VoiceConnectionStatus.Ready, clearReadyTimer);
+    connection.once(VoiceConnectionStatus.Destroyed, clearReadyTimer);
+    queueMicrotask(() => {
+      if (connection.state.status === VoiceConnectionStatus.Ready || connection.state.status === VoiceConnectionStatus.Destroyed) {
+        clearReadyTimer();
       }
     });
   }
@@ -889,10 +940,92 @@ export class DiscordPlugin implements GiadaPlugin {
     const timer = setTimeout(() => {
       this.voiceRejoinTimers.delete(guildId);
       if (this.countHumanVoiceMembers(guildId, channelId) > 0) {
-        this.joinVoice(guildId, channelId);
+        void this.joinVoice(guildId, channelId);
       }
     }, delayMs);
     this.voiceRejoinTimers.set(guildId, timer);
+  }
+
+  private warnIfVoicePermissionsAreMissing(guildId: string, channelId: string, botUserId: string) {
+    const guild = this.client?.guilds.cache.get(guildId);
+    const channel = guild?.channels.cache.get(channelId);
+    if (!channel?.isVoiceBased()) {
+      logger.warn('Cannot verify Discord voice permissions because the channel is not cached as a voice channel', {
+        guildId,
+        channelId
+      });
+      return;
+    }
+
+    const permissions = channel.permissionsFor(botUserId);
+    if (!permissions) {
+      logger.warn('Cannot verify Discord voice permissions because permissions could not be resolved', {
+        guildId,
+        channelId,
+        botUserId
+      });
+      return;
+    }
+
+    const requiredPermissions: Array<[bigint, string]> = [
+      [PermissionFlagsBits.ViewChannel, 'ViewChannel'],
+      [PermissionFlagsBits.Connect, 'Connect'],
+      [PermissionFlagsBits.Speak, 'Speak']
+    ];
+    const missing = requiredPermissions
+      .filter(([permission]) => !permissions.has(permission))
+      .map(([, name]) => name);
+
+    if (missing.length > 0) {
+      logger.warn('Discord bot is missing voice channel permissions', {
+        guildId,
+        channelId,
+        missing
+      });
+    }
+  }
+
+  private attachVoiceConnectionDiagnostics(guildId: string, channelId: string, connection: ReturnType<typeof joinVoiceChannel>) {
+    if (this.diagnosedVoiceConnections.has(connection)) {
+      return;
+    }
+    this.diagnosedVoiceConnections.add(connection);
+
+    connection.on('debug', (message) => {
+      this.getVoiceConnectionDiagnostics(guildId).lastDebug = message;
+      logger.debug('Discord voice connection debug', {
+        guildId,
+        channelId,
+        message
+      });
+    });
+    connection.on('error', (error) => {
+      this.getVoiceConnectionDiagnostics(guildId).lastError = error instanceof Error ? error.message : String(error);
+      logger.warn('Discord voice connection error', {
+        guildId,
+        channelId,
+        status: connection.state.status,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    });
+    connection.on('stateChange', (oldState, newState) => {
+      const diagnostics = this.getVoiceConnectionDiagnostics(guildId);
+      diagnostics.stateChanges += 1;
+      diagnostics.lastStateChangeAt = new Date().toISOString();
+      diagnostics.lastOldStatus = oldState.status;
+      diagnostics.lastNewStatus = newState.status;
+      diagnostics.lastReason = 'reason' in newState ? newState.reason : null;
+      diagnostics.lastCloseCode = 'closeCode' in newState ? newState.closeCode : null;
+      logger.info('Discord voice connection state changed', {
+        guildId,
+        channelId,
+        oldStatus: oldState.status,
+        newStatus: newState.status,
+        reason: 'reason' in newState ? newState.reason : null,
+        closeCode: 'closeCode' in newState ? newState.closeCode : null,
+        gateway: this.getVoiceGatewayDiagnostics(guildId)
+      });
+    });
   }
 
   private getVoiceGatewayDiagnostics(guildId: string) {
@@ -901,13 +1034,103 @@ export class DiscordPlugin implements GiadaPlugin {
       diagnostics = {
         voiceStateUpdates: 0,
         voiceServerUpdates: 0,
+        adapterVoiceStateUpdates: 0,
+        adapterVoiceServerUpdates: 0,
         lastVoiceStateUpdateAt: null,
         lastVoiceServerUpdateAt: null,
-        lastBotVoiceChannelId: null
+        lastAdapterVoiceStateUpdateAt: null,
+        lastAdapterVoiceServerUpdateAt: null,
+        lastBotVoiceChannelId: null,
+        lastBotVoiceSessionId: null
       };
       this.voiceGatewayDiagnostics.set(guildId, diagnostics);
     }
     return diagnostics;
+  }
+
+  private getVoiceConnectionDiagnostics(guildId: string) {
+    let diagnostics = this.voiceConnectionDiagnostics.get(guildId);
+    if (!diagnostics) {
+      diagnostics = {
+        stateChanges: 0,
+        lastStateChangeAt: null,
+        lastOldStatus: null,
+        lastNewStatus: null,
+        lastReason: null,
+        lastCloseCode: null,
+        lastError: null,
+        lastDebug: null
+      };
+      this.voiceConnectionDiagnostics.set(guildId, diagnostics);
+    }
+    return diagnostics;
+  }
+
+  private createVoiceAdapterCreator(baseCreator: DiscordGatewayAdapterCreator, guildId: string): DiscordGatewayAdapterCreator {
+    return (methods) => {
+      const activeAdapter: ActiveVoiceAdapter = {
+        methods: {
+          destroy: () => methods.destroy(),
+          onVoiceServerUpdate: (data) => {
+            const key = `${data.guild_id}:${data.endpoint ?? 'null'}:${data.token}`;
+            if (activeAdapter.lastVoiceServerKey === key) {
+              return;
+            }
+            activeAdapter.lastVoiceServerKey = key;
+            const diagnostics = this.getVoiceGatewayDiagnostics(guildId);
+            diagnostics.adapterVoiceServerUpdates += 1;
+            diagnostics.lastAdapterVoiceServerUpdateAt = new Date().toISOString();
+            methods.onVoiceServerUpdate(data);
+          },
+          onVoiceStateUpdate: (data) => {
+            const key = `${data.guild_id}:${data.user_id}:${data.session_id}:${data.channel_id ?? 'null'}`;
+            if (activeAdapter.lastVoiceStateKey === key) {
+              return;
+            }
+            activeAdapter.lastVoiceStateKey = key;
+            const diagnostics = this.getVoiceGatewayDiagnostics(guildId);
+            diagnostics.adapterVoiceStateUpdates += 1;
+            diagnostics.lastAdapterVoiceStateUpdateAt = new Date().toISOString();
+            methods.onVoiceStateUpdate(data);
+          }
+        },
+        lastVoiceStateKey: null,
+        lastVoiceServerKey: null
+      };
+      this.activeVoiceAdapters.set(guildId, activeAdapter);
+      const implementer = baseCreator(activeAdapter.methods);
+      return this.wrapVoiceAdapterImplementer(guildId, activeAdapter, implementer);
+    };
+  }
+
+  private wrapVoiceAdapterImplementer(
+    guildId: string,
+    activeAdapter: ActiveVoiceAdapter,
+    implementer: DiscordGatewayAdapterImplementerMethods
+  ): DiscordGatewayAdapterImplementerMethods {
+    return {
+      sendPayload: (payload) => implementer.sendPayload(payload),
+      destroy: () => {
+        if (this.activeVoiceAdapters.get(guildId) === activeAdapter) {
+          this.activeVoiceAdapters.delete(guildId);
+        }
+        implementer.destroy();
+      }
+    };
+  }
+
+  private forwardRawVoiceStateUpdate(data: { guild_id?: string; user_id?: string; channel_id?: string | null; session_id?: string | null }) {
+    if (!data.guild_id || !data.user_id || !data.session_id) {
+      return;
+    }
+    this.activeVoiceAdapters.get(data.guild_id)?.methods.onVoiceStateUpdate(data as Parameters<DiscordGatewayAdapterLibraryMethods['onVoiceStateUpdate']>[0]);
+  }
+
+  private forwardRawVoiceServerUpdate(data: { guild_id?: string }) {
+    if (!data.guild_id) {
+      return;
+    }
+    this.activeVoiceAdapters.get(data.guild_id)?.methods.onVoiceServerUpdate(data as Parameters<DiscordGatewayAdapterLibraryMethods['onVoiceServerUpdate']>[0]);
   }
 
   private countHumanVoiceMembers(guildId: string, channelId: string) {

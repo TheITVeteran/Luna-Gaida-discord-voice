@@ -38,17 +38,22 @@ interface VoiceBridgeDiagnostics {
   opusBytes: number;
   decodedPcmBytes: number;
   geminiInputBytes: number;
-  geminiTurnCompletes: number;
+  geminiActivityStarts: number;
+  geminiActivityEnds: number;
   geminiAudioEvents: number;
   geminiOutputBytes: number;
   discordOutputBytes: number;
+  lastGeminiStatus: string | null;
+  lastGeminiStatusAt: string | null;
+  lastGeminiStatusReason: string | null;
   lastSpeakingAt: string | null;
   lastRawUdpAt: string | null;
   lastUdpSsrc: number | null;
   lastOpusAt: string | null;
   lastDecodedAt: string | null;
   lastGeminiInputAt: string | null;
-  lastGeminiTurnCompleteAt: string | null;
+  lastGeminiActivityStartAt: string | null;
+  lastGeminiActivityEndAt: string | null;
   lastGeminiAudioAt: string | null;
   lastDiscordWriteAt: string | null;
   lastError: string | null;
@@ -81,17 +86,22 @@ export class DiscordVoiceBridge {
     opusBytes: 0,
     decodedPcmBytes: 0,
     geminiInputBytes: 0,
-    geminiTurnCompletes: 0,
+    geminiActivityStarts: 0,
+    geminiActivityEnds: 0,
     geminiAudioEvents: 0,
     geminiOutputBytes: 0,
     discordOutputBytes: 0,
+    lastGeminiStatus: null,
+    lastGeminiStatusAt: null,
+    lastGeminiStatusReason: null,
     lastSpeakingAt: null,
     lastRawUdpAt: null,
     lastUdpSsrc: null,
     lastOpusAt: null,
     lastDecodedAt: null,
     lastGeminiInputAt: null,
-    lastGeminiTurnCompleteAt: null,
+    lastGeminiActivityStartAt: null,
+    lastGeminiActivityEndAt: null,
     lastGeminiAudioAt: null,
     lastDiscordWriteAt: null,
     lastError: null
@@ -290,12 +300,7 @@ export class DiscordVoiceBridge {
   private receiveUserSpeech(connection: VoiceConnection, userId: string) {
     this.activeInputUsers.add(userId);
     this.diagnostics.activeInputUsers = this.activeInputUsers.size;
-    this.queueGeminiText([
-      'Discord voice metadata:',
-      `Speaker display name: ${this.resolveSpeakerName(userId)}`,
-      `Speaker user ID: ${userId}`,
-      'Treat the following audio as spoken by this speaker. Do not respond to this metadata by itself.'
-    ].join('\n'));
+    this.resolveSpeakerName(userId);
 
     const opusStream = connection.receiver.subscribe(userId, {
       end: {
@@ -309,6 +314,7 @@ export class DiscordVoiceBridge {
       rate: DISCORD_RATE
     });
     let forwardedAudio = false;
+    let activityStarted = false;
     let loggedDecodedAudio = false;
     let cleanedUp = false;
     const cleanup = (completeTurn: boolean) => {
@@ -318,8 +324,8 @@ export class DiscordVoiceBridge {
       cleanedUp = true;
       this.activeInputUsers.delete(userId);
       this.diagnostics.activeInputUsers = this.activeInputUsers.size;
-      if (completeTurn && forwardedAudio) {
-        this.queueGeminiTurnComplete();
+      if (completeTurn && activityStarted && forwardedAudio) {
+        this.queueGeminiActivityEnd();
       }
     };
 
@@ -371,20 +377,43 @@ export class DiscordVoiceBridge {
         }
         const pcm16k = downsampleDiscordPcmForGemini(chunk);
         if (pcm16k.length > 0) {
+          if (!activityStarted) {
+            activityStarted = true;
+            this.queueGeminiActivityStart();
+          }
           forwardedAudio = true;
           this.queueGeminiInput(pcm16k);
         }
       });
   }
 
-  private queueGeminiText(text: string) {
+  private queueGeminiActivityStart() {
+    this.diagnostics.geminiActivityStarts += 1;
+    this.diagnostics.lastGeminiActivityStartAt = new Date().toISOString();
     this.inputQueue = this.inputQueue
       .then(() => this.live.handleInput({
-        type: 'text',
-        text
+        type: 'activityStart'
       }, 'discord'))
       .catch((error) => {
-        logger.warn('Failed to forward Discord voice speaker metadata to Gemini Live', {
+        this.recordError(error instanceof Error ? error.message : String(error));
+        logger.warn('Failed to start Discord voice activity in Gemini Live', {
+          guildId: this.guildId,
+          channelId: this.channelId,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      });
+  }
+
+  private queueGeminiActivityEnd() {
+    this.diagnostics.geminiActivityEnds += 1;
+    this.diagnostics.lastGeminiActivityEndAt = new Date().toISOString();
+    this.inputQueue = this.inputQueue
+      .then(() => this.live.handleInput({
+        type: 'activityEnd'
+      }, 'discord'))
+      .catch((error) => {
+        this.recordError(error instanceof Error ? error.message : String(error));
+        logger.warn('Failed to end Discord voice activity in Gemini Live', {
           guildId: this.guildId,
           channelId: this.channelId,
           error: error instanceof Error ? error.message : String(error)
@@ -417,24 +446,17 @@ export class DiscordVoiceBridge {
       });
   }
 
-  private queueGeminiTurnComplete() {
-    this.diagnostics.geminiTurnCompletes += 1;
-    this.diagnostics.lastGeminiTurnCompleteAt = new Date().toISOString();
-    this.inputQueue = this.inputQueue
-      .then(() => this.live.handleInput({
-        type: 'turnComplete'
-      }, 'discord'))
-      .catch((error) => {
-        this.recordError(error instanceof Error ? error.message : String(error));
-        logger.warn('Failed to complete Discord voice turn in Gemini Live', {
-          guildId: this.guildId,
-          channelId: this.channelId,
-          error: error instanceof Error ? error.message : String(error)
-        });
-      });
-  }
-
   private handleLiveEvent(event: LiveClientEvent) {
+    if (event.type === 'status') {
+      this.diagnostics.lastGeminiStatus = event.status;
+      this.diagnostics.lastGeminiStatusAt = new Date().toISOString();
+      this.diagnostics.lastGeminiStatusReason = event.reason ?? null;
+      if (event.status === 'error' || event.reason) {
+        this.recordError(event.reason ?? event.status);
+      }
+      return;
+    }
+
     if (event.type !== 'audio') {
       return;
     }
