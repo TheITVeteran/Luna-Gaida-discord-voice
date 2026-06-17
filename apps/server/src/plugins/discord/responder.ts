@@ -9,13 +9,14 @@ import {
   type LiveConnectConfig,
   type LiveServerMessage,
   type Part,
-  type Session
+  type Session,
 } from '@google/genai';
 import type { AppConfig } from '../../config/env.js';
 import type { MemoryRepository } from '../../memory/repository.js';
 import type { PersonalityService } from '../../personality/service.js';
 import { assertDiscordSafe, sanitizeForDiscord } from '../../policy/privacy.js';
-import { createToolRegistry, type RegisteredTool } from '../../tools/registry.js';
+import { createToolRegistry, isToolAvailableForSurface, type MusicController, type RegisteredTool } from '../../tools/registry.js';
+import { logger } from '../../logging/logger.js';
 
 export interface DiscordContextMessage {
   messageId: string;
@@ -73,16 +74,18 @@ interface DiscordReplyInput {
 export class DiscordTextResponder {
   private readonly ai: GoogleGenAI | null;
   private readonly tools: RegisteredTool[];
+  private readonly textContexts = new Map<string, DiscordLiveTextContext>();
 
   constructor(
     private readonly config: AppConfig,
     private readonly memory: MemoryRepository,
-    private readonly personality: PersonalityService
+    private readonly personality: PersonalityService,
+    private readonly getMusicController?: (guildId: string, channelId: string) => MusicController | undefined
   ) {
     this.ai = config.GEMINI_API_KEY
       ? new GoogleGenAI({ apiKey: config.GEMINI_API_KEY, httpOptions: { apiVersion: config.GEMINI_API_VERSION } })
       : null;
-    this.tools = createToolRegistry();
+    this.tools = createToolRegistry().filter((tool) => isToolAvailableForSurface(tool, 'discord'));
   }
 
   async reply(input: DiscordReplyInput) {
@@ -90,18 +93,17 @@ export class DiscordTextResponder {
       return 'GEMINI_API_KEY is not configured on the backend.';
     }
 
-    const memoryContext = this.memory
-      .listForContext('discord', 16)
+    const channelMemory = this.memory.listForContext('discord', 16, ['discord', input.guildId, input.channelId]);
+    const memoryContext = (channelMemory.length ? channelMemory : this.memory.listForContext('discord', 16))
       .map((record) => `- [${record.privacy}/${record.source}] ${record.summary ?? record.content}`)
       .join('\n');
 
     const systemInstruction = [
       this.personality.buildInstruction(memoryContext, 'discord', { discordNsfwAllowed: input.channelNsfw }),
       'You are replying in Discord text chat. Keep replies concise, coherent, natural, and in character.',
+      'Never return an empty response. If you should say nothing, reply exactly [[GIADA_NO_REPLY]] instead of blank text, whitespace, punctuation-only text, or filler.',
       'Use recent channel context and reply-target context to understand whether the current message is actually asking for, inviting, or needing your response.',
-      input.mayStaySilent
-        ? 'You are in an always-listen channel, but that does not mean you should answer every message. If the current message is not directed at you and does not benefit from your input, reply with exactly [[GIADA_NO_REPLY]].'
-        : 'The current message addressed you directly, so provide a useful reply.',
+      'Each user turn includes a reply mode. If the reply mode says the message may be ignored and the current message is not directed at you or does not benefit from your input, reply with exactly [[GIADA_NO_REPLY]].',
       'When image attachments are provided, inspect them directly and use their labels to connect each image to the current message or replied-to message.',
       'When GIF attachments are provided, inspect them as visual media when possible. If only metadata is available, say what you can infer from the filename, URL, and conversation.',
       'You can see reaction summaries on recent messages. Use them as conversation context.',
@@ -123,6 +125,10 @@ export class DiscordTextResponder {
         `Guild: ${input.guildId}`,
         `Channel: ${input.channelId}`,
         `Channel age-restricted/NSFW: ${input.channelNsfw ? 'yes' : 'no'}`,
+        input.mayStaySilent
+          ? 'Reply mode: always-listen channel; answer only when the message is directed at you or benefits from your input. Otherwise reply exactly [[GIADA_NO_REPLY]].'
+          : 'Reply mode: addressed directly; provide a useful reply.',
+        'No-reply contract: never send blank output. If no response should be posted, output exactly [[GIADA_NO_REPLY]].',
         input.knownUsers?.length
           ? `Current known Discord users:\n${input.knownUsers.map(formatKnownUser).join('\n')}`
           : null,
@@ -141,8 +147,18 @@ export class DiscordTextResponder {
       parts.push({ text: `Image attachment: ${image.label}` });
       parts.push({ inlineData: { mimeType: image.mimeType, data: image.data } });
     }
+    if (memoryContext) {
+      parts.push({ text: `Current channel memory for this Discord text context:\n${memoryContext}` });
+    }
 
-    const text = await this.generateLiveTextReply(systemInstruction, parts, input) || 'I heard you, but I could not form a text reply.';
+    const text = await this.generateTextReply(systemInstruction, parts, input);
+    if (!text) {
+      logger.warn('Discord text responder returned empty text; treating as no-reply tag', {
+        guildId: input.guildId,
+        channelId: input.channelId
+      });
+      return null;
+    }
     if (shouldStaySilent(text)) {
       return null;
     }
@@ -150,131 +166,67 @@ export class DiscordTextResponder {
     return safe.ok ? clampDiscordMessage(safe.text) : safe.text;
   }
 
-  private async generateLiveTextReply(systemInstruction: string, parts: Part[], input: DiscordReplyInput) {
+  private async generateTextReply(systemInstruction: string, parts: Part[], input: DiscordReplyInput) {
     let lastError: unknown;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
-        return await this.generateLiveTextReplyOnce(systemInstruction, parts, input);
+        return await this.generateTextReplyOnce(systemInstruction, attempt > 0 ? withEmptyRetryInstruction(parts) : parts, input);
       } catch (error) {
         lastError = error;
+        if (!(error instanceof EmptyDiscordLiveTextResponseError)) {
+          break;
+        }
       }
+    }
+    if (lastError instanceof EmptyDiscordLiveTextResponseError) {
+      logger.warn('Discord Live text response stayed empty after retry; treating as no-reply tag', {
+        guildId: input.guildId,
+        channelId: input.channelId
+      });
+      return '[[GIADA_NO_REPLY]]';
     }
     throw lastError;
   }
 
-  private async generateLiveTextReplyOnce(systemInstruction: string, parts: Part[], input: DiscordReplyInput) {
-    let session: Session | null = null;
-    let settled = false;
-    let transcriptText = '';
-    let finish: (value: string) => void = () => {};
-    let fail: (error: unknown) => void = () => {};
-
-    try {
-      const response = new Promise<string>((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          if (!settled) {
-            settled = true;
-            reject(new Error('Discord Live text response timed out'));
-          }
-        }, 25_000);
-
-        finish = (value: string) => {
-          if (settled) {
-            return;
-          }
-          settled = true;
-          clearTimeout(timeout);
-          resolve(value);
-        };
-
-        fail = (error: unknown) => {
-          if (settled) {
-            return;
-          }
-          settled = true;
-          clearTimeout(timeout);
-          reject(error);
-        };
-      });
-
-      const config: LiveConnectConfig = {
-        responseModalities: [Modality.AUDIO],
-        outputAudioTranscription: {},
-        systemInstruction,
-        temperature: 0.8,
-        safetySettings: [
-          { category: HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY, threshold: HarmBlockThreshold.OFF },
-          { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.OFF },
-          { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.OFF },
-          { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.OFF },
-          { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.OFF }
-        ]
-      };
-      config.tools = [
-        {
-          googleSearch: {},
-          googleSearchRetrieval: {
-            dynamicRetrievalConfig: { mode: DynamicRetrievalConfigMode.MODE_DYNAMIC }
-          }
-        },
-        {
-          functionDeclarations: [
-            ...this.tools.map((tool) => structuredClone(tool.declaration) as Record<string, unknown>),
-            ...discordToolDeclarations(input)
-          ]
-        }
-      ];
-
-      session = await this.ai!.live.connect({
-        model: this.config.GEMINI_MODEL,
-        config,
-        callbacks: {
-          onmessage: (message: LiveServerMessage) => {
-            if (message.toolCall?.functionCalls?.length && session) {
-              void this.handleToolCalls(message.toolCall.functionCalls, session, input);
-            }
-            const text = extractLiveText(message);
-            if (text) {
-              transcriptText = appendTranscriptText(transcriptText, text);
-            }
-            if (message.serverContent?.turnComplete) {
-              finish(transcriptText.trim());
-            }
-          },
-          onerror: (error) => fail(error),
-          onclose: (event) => {
-            if (!settled) {
-              fail(new Error(`Discord Live text session closed before completion: ${event.reason}`));
-            }
-          }
-        }
-      });
-
-      session.sendClientContent({
-        turns: [{ role: 'user', parts }],
-        turnComplete: true
-      });
-
-      return await response;
-    } finally {
-      session?.close();
-    }
+  private async generateTextReplyOnce(systemInstruction: string, parts: Part[], input: DiscordReplyInput) {
+    const context = this.getTextContext(input, systemInstruction);
+    return context.generate(parts, input, (functionCalls, session, currentInput) => this.handleLiveToolCalls(functionCalls, session, currentInput));
   }
 
-  private async handleToolCalls(functionCalls: FunctionCall[], session: Session, input: DiscordReplyInput) {
-    const functionResponses: Record<string, unknown>[] = [];
+  private async runToolCalls(functionCalls: FunctionCall[], input: DiscordReplyInput) {
+    const functionResponses: Array<{ id: string; name: string; response: Record<string, unknown> }> = [];
     for (const call of functionCalls) {
       const id = call.id ?? `${call.name ?? 'tool'}-${functionResponses.length}`;
       const name = call.name ?? 'unknown';
       const sharedTool = this.tools.find((candidate) => candidate.declaration.name === name);
       if (sharedTool) {
         try {
+          const music = this.getMusicController?.(input.guildId, input.channelId);
+          logger.info('Discord text responder requested shared tool', {
+            guildId: input.guildId,
+            channelId: input.channelId,
+            name,
+            musicControllerAvailable: Boolean(music)
+          });
           const response = await sharedTool.run(call.args, {
             surface: 'discord',
-            memory: this.memory
+            memory: this.memory,
+            ...(music ? { music } : {})
+          });
+          logger.info('Discord text responder shared tool completed', {
+            guildId: input.guildId,
+            channelId: input.channelId,
+            name,
+            response: summarizeToolResponse(response)
           });
           functionResponses.push({ id, name, response });
         } catch (error) {
+          logger.warn('Discord text responder shared tool failed', {
+            guildId: input.guildId,
+            channelId: input.channelId,
+            name,
+            error: error instanceof Error ? error.message : String(error)
+          });
           functionResponses.push({ id, name, response: { ok: false, error: error instanceof Error ? error.message : String(error) } });
         }
         continue;
@@ -327,7 +279,44 @@ export class DiscordTextResponder {
         });
       }
     }
+    return functionResponses;
+  }
+
+  private async handleLiveToolCalls(functionCalls: FunctionCall[], session: Session, input: DiscordReplyInput) {
+    const functionResponses = await this.runToolCalls(functionCalls, input);
     session.sendToolResponse({ functionResponses: functionResponses as never });
+  }
+
+  private getTextContext(input: DiscordReplyInput, systemInstruction: string) {
+    const key = discordTextContextKey(input.guildId, input.channelId);
+    let context = this.textContexts.get(key);
+    if (!context) {
+      context = new DiscordLiveTextContext(
+        key,
+        this.ai!,
+        this.config.GEMINI_MODEL,
+        systemInstruction,
+        () => [
+          {
+            googleSearch: {},
+            googleSearchRetrieval: {
+              dynamicRetrievalConfig: { mode: DynamicRetrievalConfigMode.MODE_DYNAMIC }
+            }
+          },
+          {
+            functionDeclarations: [
+              ...this.tools.map((tool) => structuredClone(tool.declaration) as Record<string, unknown>),
+              ...discordToolDeclarations(input)
+            ]
+          }
+        ],
+        () => {
+          this.textContexts.delete(key);
+        }
+      );
+      this.textContexts.set(key, context);
+    }
+    return context;
   }
 
   private async searchGif(query: string, channelNsfw: boolean): Promise<{ url: string; provider: 'giphy' | 'tenor' } | null> {
@@ -346,6 +335,238 @@ export class DiscordTextResponder {
 
     return null;
   }
+}
+
+interface PendingDiscordLiveTextRequest {
+  input: DiscordReplyInput;
+  outputText: string;
+  toolCallCount: number;
+  audioParts: number;
+  timeout: ReturnType<typeof setTimeout>;
+  turnCompleteTimer: ReturnType<typeof setTimeout> | null;
+  resolve: (value: string) => void;
+  reject: (error: unknown) => void;
+}
+
+class DiscordLiveTextContext {
+  private session: Session | null = null;
+  private connecting: Promise<void> | null = null;
+  private current: PendingDiscordLiveTextRequest | null = null;
+  private queue: Promise<unknown> = Promise.resolve();
+
+  constructor(
+    private readonly key: string,
+    private readonly ai: GoogleGenAI,
+    private readonly model: string,
+    private readonly systemInstruction: string,
+    private readonly toolsProvider: () => Array<Record<string, unknown>>,
+    private readonly onDispose: () => void
+  ) {}
+
+  generate(
+    parts: Part[],
+    input: DiscordReplyInput,
+    handleToolCalls: (functionCalls: FunctionCall[], session: Session, input: DiscordReplyInput) => Promise<void>
+  ) {
+    const run = this.queue
+      .catch(() => undefined)
+      .then(() => this.generateNow(parts, input, handleToolCalls));
+    this.queue = run.catch(() => undefined);
+    return run;
+  }
+
+  private async generateNow(
+    parts: Part[],
+    input: DiscordReplyInput,
+    handleToolCalls: (functionCalls: FunctionCall[], session: Session, input: DiscordReplyInput) => Promise<void>
+  ) {
+    await this.connect(handleToolCalls);
+    if (!this.session) {
+      return '';
+    }
+
+    const response = new Promise<string>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.rejectCurrent(new Error('Discord Live text response timed out'));
+        this.dispose();
+      }, 25_000);
+
+      this.current = {
+        input,
+        outputText: '',
+        toolCallCount: 0,
+        audioParts: 0,
+        timeout,
+        turnCompleteTimer: null,
+        resolve,
+        reject
+      };
+    });
+
+    this.session.sendClientContent({
+      turns: [{ role: 'user', parts }],
+      turnComplete: true
+    });
+
+    return response;
+  }
+
+  private async connect(handleToolCalls: (functionCalls: FunctionCall[], session: Session, input: DiscordReplyInput) => Promise<void>) {
+    if (this.session) {
+      return;
+    }
+    if (this.connecting) {
+      return this.connecting;
+    }
+
+    const config: LiveConnectConfig = {
+      responseModalities: [Modality.AUDIO],
+      outputAudioTranscription: {},
+      systemInstruction: this.systemInstruction,
+      temperature: 0.8,
+      safetySettings: [
+        { category: HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY, threshold: HarmBlockThreshold.OFF },
+        { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.OFF },
+        { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.OFF },
+        { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.OFF },
+        { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.OFF }
+      ],
+      tools: this.toolsProvider()
+    };
+
+    this.connecting = this.ai.live.connect({
+      model: this.model,
+      config,
+      callbacks: {
+        onmessage: (message: LiveServerMessage) => this.handleMessage(message, handleToolCalls),
+        onerror: (error) => {
+          this.rejectCurrent(error);
+          this.dispose();
+        },
+        onclose: (event) => {
+          this.rejectCurrent(new Error(`Discord Live text session closed before completion: ${event.reason}`));
+          this.dispose();
+        }
+      }
+    }).then((session) => {
+      this.session = session;
+    }).finally(() => {
+      this.connecting = null;
+    });
+
+    return this.connecting;
+  }
+
+  private handleMessage(
+    message: LiveServerMessage,
+    handleToolCalls: (functionCalls: FunctionCall[], session: Session, input: DiscordReplyInput) => Promise<void>
+  ) {
+    const current = this.current;
+    if (!current) {
+      return;
+    }
+
+    const text = extractLiveText(message);
+    if (text) {
+      current.outputText = appendTranscriptText(current.outputText, text);
+      if (current.turnCompleteTimer && current.outputText.trim()) {
+        this.resolveCurrent(current.outputText.trim());
+        return;
+      }
+    }
+    current.audioParts += countAudioParts(message);
+
+    if (message.toolCall?.functionCalls?.length && this.session) {
+      current.toolCallCount += message.toolCall.functionCalls.length;
+      if (current.toolCallCount > 12) {
+        this.rejectCurrent(new Error('Discord Live text response exceeded tool-call limit'));
+        return;
+      }
+      void handleToolCalls(message.toolCall.functionCalls, this.session, current.input).catch((error) => {
+        this.rejectCurrent(error);
+      });
+    }
+
+    if (message.serverContent?.turnComplete) {
+      if (current.outputText.trim()) {
+        this.resolveCurrent(current.outputText.trim());
+        return;
+      }
+      if (!current.turnCompleteTimer) {
+        current.turnCompleteTimer = setTimeout(() => {
+          if (current.outputText.trim()) {
+            this.resolveCurrent(current.outputText.trim());
+            return;
+          }
+          const error = new EmptyDiscordLiveTextResponseError('Discord Live text response completed without output transcription');
+          logger.warn(error.message, {
+            key: this.key,
+            guildId: current.input.guildId,
+            channelId: current.input.channelId,
+            audioParts: current.audioParts,
+            toolCallCount: current.toolCallCount,
+            mayStaySilent: Boolean(current.input.mayStaySilent)
+          });
+          this.rejectCurrent(error);
+          this.dispose();
+        }, 1200);
+      }
+    }
+  }
+
+  private resolveCurrent(value: string) {
+    const current = this.current;
+    if (!current) {
+      return;
+    }
+    clearTimeout(current.timeout);
+    if (current.turnCompleteTimer) {
+      clearTimeout(current.turnCompleteTimer);
+    }
+    this.current = null;
+    current.resolve(value);
+  }
+
+  private rejectCurrent(error: unknown) {
+    const current = this.current;
+    if (!current) {
+      return;
+    }
+    clearTimeout(current.timeout);
+    if (current.turnCompleteTimer) {
+      clearTimeout(current.turnCompleteTimer);
+    }
+    this.current = null;
+    current.reject(error);
+  }
+
+  private dispose() {
+    const session = this.session;
+    this.session = null;
+    this.connecting = null;
+    if (session) {
+      try {
+        session.close();
+      } catch (error) {
+        logger.debug('Failed to close Discord Live text context', {
+          key: this.key,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+    this.onDispose();
+  }
+}
+
+class EmptyDiscordLiveTextResponseError extends Error {}
+
+function withEmptyRetryInstruction(parts: Part[]) {
+  return [
+    ...parts,
+    {
+      text: 'Retry instruction: your previous Live turn completed with no audio and no output transcription. This retry must not be empty. Produce a normal concise Discord reply, or output exactly [[GIADA_NO_REPLY]] if nothing should be sent.'
+    }
+  ];
 }
 
 function discordToolDeclarations(input: DiscordReplyInput) {
@@ -422,6 +643,16 @@ function formatAttachmentSummary(attachment: DiscordAttachmentSummary) {
 
 function formatReactionSummary(reaction: DiscordReactionSummary) {
   return `${reaction.emoji} x${reaction.count}${reaction.reactedByBot ? ' (Giada reacted)' : ''}`;
+}
+
+function summarizeToolResponse(response: Record<string, unknown>) {
+  const summary: Record<string, unknown> = {};
+  for (const key of ['ok', 'error', 'blocked', 'reason', 'title', 'url', 'durationSeconds', 'stopped']) {
+    if (key in response) {
+      summary[key] = response[key];
+    }
+  }
+  return Object.keys(summary).length ? summary : { keys: Object.keys(response) };
 }
 
 function parseReactionArgs(args: unknown) {
@@ -526,6 +757,10 @@ function isHttpGifUrl(value: string | null): value is string {
   return ['http:', 'https:'].includes(parsed.protocol);
 }
 
+function discordTextContextKey(guildId: string, channelId: string) {
+  return `${guildId}:${channelId}`;
+}
+
 function extractLiveText(message: LiveServerMessage) {
   const transcript = message.serverContent?.outputTranscription?.text;
   if (transcript) {
@@ -534,7 +769,18 @@ function extractLiveText(message: LiveServerMessage) {
   return (message.serverContent?.modelTurn?.parts ?? [])
     .filter((part) => !part.thought && typeof part.text === 'string')
     .map((part) => part.text)
-    .join('')
+    .join('');
+}
+
+function countAudioParts(message: LiveServerMessage) {
+  return (message.serverContent?.modelTurn?.parts ?? [])
+    .filter((part) => {
+      const inlineData = part.inlineData;
+      return typeof inlineData?.data === 'string'
+        && inlineData.data.length > 0
+        && (!inlineData.mimeType || inlineData.mimeType.startsWith('audio/'));
+    })
+    .length;
 }
 
 function appendTranscriptText(previous: string, incoming: string) {

@@ -24,6 +24,12 @@ Simultaneous true multi-monitor streaming is not implemented. The realistic fall
 
 The screen-share request asks for audio when enabled. Whether a system-audio track is returned is platform/WebView-dependent.
 
+## Discord Voice Music And Video
+
+Discord voice music playback requires local `yt-dlp` and `ffmpeg` executables on the backend host. The backend streams and decodes audio into the Discord voice connection; it does not save downloaded media files.
+
+Viewing Discord voice video, screen shares, or Go Live streams from a bot is not supported by the official discord.js/@discordjs/voice stack used in this project. Implementing it would require unsupported Discord RTC/video receive behavior outside this foundation.
+
 ## Native Screenshot
 
 The command is permission-gated but returns unsupported in this foundation. Use browser screen sharing for realtime visual context. A production native implementation should be added per OS with explicit permission UX and tests.

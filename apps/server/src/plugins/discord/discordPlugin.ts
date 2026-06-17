@@ -73,7 +73,7 @@ const giadaCommand = new SlashCommandBuilder()
       .setRequired(true)))
   .addSubcommand((subcommand) => subcommand
     .setName('listen')
-    .setDescription('Set or disable the always-listen text channel.')
+    .setDescription('Add or remove an always-listen text channel.')
     .addStringOption((option) => option
       .setName('mode')
       .setDescription('Use here to let Giada observe this channel, or off to require her name/mention.')
@@ -89,7 +89,7 @@ const giadaCommand = new SlashCommandBuilder()
       .setRequired(false)))
   .addSubcommand((subcommand) => subcommand
     .setName('voice')
-    .setDescription('Join voice or configure voice-channel watching.')
+    .setDescription('Join voice or configure watched voice channels.')
     .addStringOption((option) => option
       .setName('mode')
       .setDescription('watch joins when people enter; off disables watching; join joins now.')
@@ -200,7 +200,12 @@ export class DiscordPlugin implements GiadaPlugin {
     private readonly personality: PersonalityService
   ) {
     this.settings = new DiscordSettingsStore(config.databasePath);
-    this.responder = new DiscordTextResponder(config, memory, personality);
+    this.responder = new DiscordTextResponder(
+      config,
+      memory,
+      personality,
+      (guildId, channelId) => this.getMusicControllerForChannel(guildId, channelId)
+    );
   }
 
   async start() {
@@ -220,7 +225,24 @@ export class DiscordPlugin implements GiadaPlugin {
     });
 
     this.client.on(Events.MessageCreate, (message) => {
-      void this.handleMessage(message);
+      void this.handleMessage(message).catch((error) => {
+        logger.error('Discord message handler failed', {
+          guildId: message.guildId,
+          channelId: message.channelId,
+          messageId: message.id,
+          error: error instanceof Error ? error.message : String(error)
+        });
+        if (message.guildId && message.author.id !== this.client?.user?.id) {
+          void this.reply(message, 'I saw your message, but my reply generator failed. Check the backend logs for the exact error.').catch((replyError) => {
+            logger.warn('Failed to send Discord message handler fallback', {
+              guildId: message.guildId,
+              channelId: message.channelId,
+              messageId: message.id,
+              error: replyError instanceof Error ? replyError.message : String(replyError)
+            });
+          });
+        }
+      });
     });
     this.client.on('raw', (packet: { t?: string; d?: { id?: string; type?: number; data?: { name?: string }; guild_id?: string; user_id?: string; channel_id?: string | null; session_id?: string | null } }) => {
       if (packet.t === 'INTERACTION_CREATE') {
@@ -359,26 +381,22 @@ export class DiscordPlugin implements GiadaPlugin {
         name: guild.name
       })),
       voiceWatch: [...(this.client?.guilds.cache.values() ?? [])]
-        .map((guild) => {
-          const channelId = this.settings.get(guild.id).voiceWatchChannelId;
-          if (!channelId) {
-            return null;
-          }
+        .flatMap((guild) => this.settings.get(guild.id).voiceWatchChannelIds.map((channelId) => {
           const connection = getVoiceConnection(guild.id);
+          const key = voiceBridgeKey(guild.id, channelId);
           return {
             guildId: guild.id,
             channelId,
             humanMembers: this.countHumanVoiceMembers(guild.id, channelId),
             connectedChannelId: connection?.joinConfig.channelId ?? null,
-            bridgeActive: this.voiceBridges.has(guild.id),
-            readyTimerActive: this.voiceReadyTimers.has(guild.id),
-            rejoinScheduled: this.voiceRejoinTimers.has(guild.id),
-            readyReconnectAttempts: this.voiceReadyReconnectAttempts.get(guild.id) ?? 0,
+            bridgeActive: this.voiceBridges.has(key),
+            readyTimerActive: this.voiceReadyTimers.has(key),
+            rejoinScheduled: this.voiceRejoinTimers.has(key),
+            readyReconnectAttempts: this.voiceReadyReconnectAttempts.get(key) ?? 0,
             gateway: this.getVoiceGatewayDiagnostics(guild.id),
             connection: this.getVoiceConnectionDiagnostics(guild.id)
           };
-        })
-        .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry)),
+        })),
       voiceBridges: [...this.voiceBridges.values()].map((bridge) => bridge.getStatus())
     };
   }
@@ -432,7 +450,7 @@ export class DiscordPlugin implements GiadaPlugin {
     }
 
     const addressed = this.isAddressed(message);
-    const voiceTextBridge = this.getConnectedVoiceTextBridge(message, addressed);
+    const voiceTextBridge = this.getConnectedVoiceTextBridge(message);
     if (voiceTextBridge) {
       if (this.hasSeenVoiceTextMessage(message.id)) {
         return;
@@ -446,13 +464,19 @@ export class DiscordPlugin implements GiadaPlugin {
           privacy: 'public',
           tags: ['discord', 'voice-text', message.guildId, message.channelId]
         });
+        logger.info('Discord text message forwarded to active voice bridge instead of text reply', {
+          guildId: message.guildId,
+          channelId: message.channelId,
+          messageId: message.id,
+          textLength: safeInput.text.length
+        });
         voiceTextBridge.speakTextChatMessage(message.member?.displayName ?? message.author.username, safeInput.text);
       }
       return;
     }
 
     const settings = this.settings.get(message.guildId);
-    const listeningChannel = settings.listeningChannelId === message.channelId;
+    const listeningChannel = settings.listeningChannelIds.includes(message.channelId);
     if (!listeningChannel && !addressed) {
       return;
     }
@@ -497,6 +521,13 @@ export class DiscordPlugin implements GiadaPlugin {
       }))
     });
     if (!response) {
+      logger.info('Discord text responder produced no Discord reply', {
+        guildId: message.guildId,
+        channelId: message.channelId,
+        messageId: message.id,
+        addressed,
+        listeningChannel
+      });
       return;
     }
     await this.reply(message, response);
@@ -520,7 +551,7 @@ export class DiscordPlugin implements GiadaPlugin {
     return false;
   }
 
-  private getConnectedVoiceTextBridge(message: Message, addressed: boolean) {
+  private getConnectedVoiceTextBridge(message: Message) {
     if (!message.guildId) {
       return null;
     }
@@ -529,11 +560,11 @@ export class DiscordPlugin implements GiadaPlugin {
     if (connection?.state.status !== VoiceConnectionStatus.Ready || !voiceChannelId) {
       return null;
     }
-    const bridge = this.voiceBridges.get(message.guildId);
+    const bridge = this.voiceBridges.get(voiceBridgeKey(message.guildId, voiceChannelId));
     if (!bridge) {
       return null;
     }
-    if (addressed || isVoiceTextChannelMessage(message, voiceChannelId)) {
+    if (isVoiceTextChannelMessage(message, voiceChannelId)) {
       return bridge;
     }
     return null;
@@ -638,25 +669,36 @@ export class DiscordPlugin implements GiadaPlugin {
 
     if (subcommand === 'listen') {
       const mode = interaction.options.getString('mode', true);
+      const channelId = interaction.options.getChannel('channel')?.id ?? interaction.channelId;
       if (mode === 'off') {
-        this.settings.setListeningChannel(interaction.guildId, null);
-        await this.replyInteraction(interaction, 'Listening channel disabled. I will answer only when named or mentioned.');
+        this.settings.removeListeningChannel(interaction.guildId, channelId);
+        await this.replyInteraction(interaction, `Listening disabled for <#${channelId}>. I will answer there only when named or mentioned.`);
         return;
       }
-      const channelId = interaction.options.getChannel('channel')?.id ?? interaction.channelId;
-      this.settings.setListeningChannel(interaction.guildId, channelId);
-      await this.replyInteraction(interaction, `Listening channel set to <#${channelId}>. I will watch the conversation there and reply when it makes sense.`);
+      this.settings.addListeningChannel(interaction.guildId, channelId);
+      await this.replyInteraction(interaction, `Listening enabled for <#${channelId}>. I will watch the conversation there and reply when it makes sense.`);
       return;
     }
 
     if (subcommand === 'voice') {
       const mode = interaction.options.getString('mode', true);
       if (mode === 'off') {
-        const settings = this.settings.get(interaction.guildId);
-        this.settings.setVoiceWatchChannel(interaction.guildId, null);
-        this.destroyVoiceBridge(interaction.guildId);
-        getVoiceConnection(interaction.guildId)?.destroy();
-        await this.replyInteraction(interaction, `Voice watch disabled${settings.voiceWatchChannelId ? ` for <#${settings.voiceWatchChannelId}>` : ''}.`);
+        const selected = interaction.options.getChannel('channel')?.id;
+        const activeChannelId = selected ?? getVoiceConnection(interaction.guildId)?.joinConfig.channelId ?? null;
+        if (activeChannelId) {
+          this.settings.removeVoiceWatchChannel(interaction.guildId, activeChannelId);
+          this.destroyVoiceBridge(interaction.guildId, activeChannelId);
+          const connection = getVoiceConnection(interaction.guildId);
+          if (connection?.joinConfig.channelId === activeChannelId) {
+            connection.destroy();
+          }
+          await this.replyInteraction(interaction, `Voice watch disabled for <#${activeChannelId}>.`);
+        } else {
+          this.settings.clearVoiceWatchChannels(interaction.guildId);
+          this.destroyAllVoiceBridgesForGuild(interaction.guildId);
+          getVoiceConnection(interaction.guildId)?.destroy();
+          await this.replyInteraction(interaction, 'Voice watch disabled for all watched channels.');
+        }
         return;
       }
 
@@ -667,8 +709,8 @@ export class DiscordPlugin implements GiadaPlugin {
       }
 
       if (mode === 'watch') {
-        this.settings.setVoiceWatchChannel(interaction.guildId, voiceChannelId);
-        await this.replyInteraction(interaction, `Voice watch set to <#${voiceChannelId}>. I will join when someone enters and leave after everyone leaves.`);
+        this.settings.addVoiceWatchChannel(interaction.guildId, voiceChannelId);
+        await this.replyInteraction(interaction, `Voice watch enabled for <#${voiceChannelId}>. I will join when someone enters and leave after everyone leaves.`);
         await this.joinWatchedVoiceIfNeeded(interaction.guildId, voiceChannelId);
         return;
       }
@@ -740,29 +782,40 @@ export class DiscordPlugin implements GiadaPlugin {
 
     if (subcommand?.name === 'listen') {
       const mode = getHttpStringOption(subcommand, 'mode');
-      if (mode === 'off') {
-        this.settings.setListeningChannel(payload.guild_id, null);
-        await this.updateHttpInteraction(payload, 'Listening channel disabled. I will answer only when named or mentioned.');
-        return;
-      }
       const channelId = getHttpStringOption(subcommand, 'channel') ?? payload.channel_id;
       if (!channelId) {
         await this.updateHttpInteraction(payload, 'Choose a text channel or run this command inside one.');
         return;
       }
-      this.settings.setListeningChannel(payload.guild_id, channelId);
-      await this.updateHttpInteraction(payload, `Listening channel set to <#${channelId}>. I will watch the conversation there and reply when it makes sense.`);
+      if (mode === 'off') {
+        this.settings.removeListeningChannel(payload.guild_id, channelId);
+        await this.updateHttpInteraction(payload, `Listening disabled for <#${channelId}>. I will answer there only when named or mentioned.`);
+        return;
+      }
+      this.settings.addListeningChannel(payload.guild_id, channelId);
+      await this.updateHttpInteraction(payload, `Listening enabled for <#${channelId}>. I will watch the conversation there and reply when it makes sense.`);
       return;
     }
 
     if (subcommand?.name === 'voice') {
       const mode = getHttpStringOption(subcommand, 'mode');
       if (mode === 'off') {
-        const settings = this.settings.get(payload.guild_id);
-        this.settings.setVoiceWatchChannel(payload.guild_id, null);
-        this.destroyVoiceBridge(payload.guild_id);
-        getVoiceConnection(payload.guild_id)?.destroy();
-        await this.updateHttpInteraction(payload, `Voice watch disabled${settings.voiceWatchChannelId ? ` for <#${settings.voiceWatchChannelId}>` : ''}.`);
+        const selected = getHttpStringOption(subcommand, 'channel');
+        const activeChannelId = selected ?? getVoiceConnection(payload.guild_id)?.joinConfig.channelId ?? null;
+        if (activeChannelId) {
+          this.settings.removeVoiceWatchChannel(payload.guild_id, activeChannelId);
+          this.destroyVoiceBridge(payload.guild_id, activeChannelId);
+          const connection = getVoiceConnection(payload.guild_id);
+          if (connection?.joinConfig.channelId === activeChannelId) {
+            connection.destroy();
+          }
+          await this.updateHttpInteraction(payload, `Voice watch disabled for <#${activeChannelId}>.`);
+        } else {
+          this.settings.clearVoiceWatchChannels(payload.guild_id);
+          this.destroyAllVoiceBridgesForGuild(payload.guild_id);
+          getVoiceConnection(payload.guild_id)?.destroy();
+          await this.updateHttpInteraction(payload, 'Voice watch disabled for all watched channels.');
+        }
         return;
       }
 
@@ -773,8 +826,8 @@ export class DiscordPlugin implements GiadaPlugin {
       }
 
       if (mode === 'watch') {
-        this.settings.setVoiceWatchChannel(payload.guild_id, voiceChannelId);
-        await this.updateHttpInteraction(payload, `Voice watch set to <#${voiceChannelId}>. I will join when someone enters and leave after everyone leaves.`);
+        this.settings.addVoiceWatchChannel(payload.guild_id, voiceChannelId);
+        await this.updateHttpInteraction(payload, `Voice watch enabled for <#${voiceChannelId}>. I will join when someone enters and leave after everyone leaves.`);
         await this.joinWatchedVoiceIfNeeded(payload.guild_id, voiceChannelId);
         return;
       }
@@ -870,26 +923,29 @@ export class DiscordPlugin implements GiadaPlugin {
   private async handleVoiceStateUpdate(oldState: VoiceState, newState: VoiceState) {
     const guildId = newState.guild.id;
     const settings = this.settings.get(guildId);
-    if (!settings.voiceWatchChannelId) {
+    if (!settings.voiceWatchChannelIds.length) {
       return;
     }
 
-    const watchedChannelId = settings.voiceWatchChannelId;
+    const watchedChannelIds = settings.voiceWatchChannelIds;
     const botUserId = this.client?.user?.id;
     const isBotVoiceState = Boolean(botUserId && oldState.id === botUserId);
-    if (isBotVoiceState && oldState.channelId === watchedChannelId && newState.channelId !== watchedChannelId) {
-      this.scheduleVoiceRejoin(guildId, watchedChannelId, VOICE_REJOIN_DELAY_MS);
+    if (isBotVoiceState && oldState.channelId && watchedChannelIds.includes(oldState.channelId) && newState.channelId !== oldState.channelId) {
+      this.scheduleVoiceRejoin(guildId, oldState.channelId, VOICE_REJOIN_DELAY_MS);
       return;
     }
 
-    if (newState.channelId === watchedChannelId) {
-      await this.joinWatchedVoiceIfNeeded(guildId, watchedChannelId);
+    if (newState.channelId && watchedChannelIds.includes(newState.channelId)) {
+      await this.joinWatchedVoiceIfNeeded(guildId, newState.channelId);
       return;
     }
 
-    if (oldState.channelId === watchedChannelId || newState.channelId === watchedChannelId) {
+    if ((oldState.channelId && watchedChannelIds.includes(oldState.channelId)) || (newState.channelId && watchedChannelIds.includes(newState.channelId))) {
+      const channelId = oldState.channelId && watchedChannelIds.includes(oldState.channelId) ? oldState.channelId : newState.channelId;
       setTimeout(() => {
-        this.leaveWatchedVoiceIfEmpty(guildId, watchedChannelId);
+        if (channelId) {
+          this.leaveWatchedVoiceIfEmpty(guildId, channelId);
+        }
       }, 1000);
     }
   }
@@ -898,6 +954,17 @@ export class DiscordPlugin implements GiadaPlugin {
     const guild = this.client?.guilds.cache.get(guildId);
     if (guild) {
       await guild.channels.fetch(channelId).catch(() => null);
+    }
+    const existingConnection = getVoiceConnection(guildId);
+    const existingChannelId = existingConnection?.joinConfig.channelId;
+    if (
+      existingConnection
+      && existingConnection.state.status !== VoiceConnectionStatus.Destroyed
+      && existingChannelId
+      && existingChannelId !== channelId
+      && this.countHumanVoiceMembers(guildId, existingChannelId) > 0
+    ) {
+      return;
     }
     const humanMembers = this.countHumanVoiceMembers(guildId, channelId);
     if (humanMembers <= 0) {
@@ -915,7 +982,7 @@ export class DiscordPlugin implements GiadaPlugin {
     if (connection?.joinConfig.channelId !== channelId) {
       return;
     }
-    this.destroyVoiceBridge(guildId);
+    this.destroyVoiceBridge(guildId, channelId);
     connection.destroy();
   }
 
@@ -941,16 +1008,19 @@ export class DiscordPlugin implements GiadaPlugin {
     const existingConnection = getVoiceConnection(guildId);
     if (existingConnection?.joinConfig.channelId === channelId) {
       if (existingConnection.state.status === VoiceConnectionStatus.Destroyed) {
-        this.destroyVoiceBridge(guildId);
+        this.destroyVoiceBridge(guildId, channelId);
       } else {
         this.attachVoiceConnectionDiagnostics(guildId, channelId, existingConnection);
-        this.getVoiceBridge(guildId, botUserId).attach(existingConnection, channelId);
+        this.getVoiceBridge(guildId, channelId, botUserId).attach(existingConnection, channelId);
         this.watchVoiceReady(guildId, channelId, existingConnection);
         this.unsuppressStageVoiceIfNeeded(guildId, channelId);
         return;
       }
     } else if (existingConnection) {
-      this.destroyVoiceBridge(guildId);
+      const existingChannelId = existingConnection.joinConfig.channelId;
+      if (existingChannelId) {
+        this.destroyVoiceBridge(guildId, existingChannelId);
+      }
       this.destroyVoiceConnection(existingConnection, guildId, channelId);
     }
     const connection = joinVoiceChannel({
@@ -962,27 +1032,28 @@ export class DiscordPlugin implements GiadaPlugin {
       debug: true
     });
     this.attachVoiceConnectionDiagnostics(guildId, channelId, connection);
-    this.getVoiceBridge(guildId, botUserId).attach(connection, channelId);
+    this.getVoiceBridge(guildId, channelId, botUserId).attach(connection, channelId);
     this.watchVoiceReady(guildId, channelId, connection);
     this.unsuppressStageVoiceIfNeeded(guildId, channelId);
   }
 
   private watchVoiceReady(guildId: string, channelId: string, connection: ReturnType<typeof joinVoiceChannel>) {
-    if (this.voiceReadyTimers.has(guildId)) {
+    const key = voiceBridgeKey(guildId, channelId);
+    if (this.voiceReadyTimers.has(key)) {
       return;
     }
     if (connection.state.status === VoiceConnectionStatus.Ready || connection.state.status === VoiceConnectionStatus.Destroyed) {
       return;
     }
     const clearReadyTimer = () => {
-      const activeTimer = this.voiceReadyTimers.get(guildId);
+      const activeTimer = this.voiceReadyTimers.get(key);
       if (activeTimer) {
         clearTimeout(activeTimer);
-        this.voiceReadyTimers.delete(guildId);
+        this.voiceReadyTimers.delete(key);
       }
     };
     const timer = setTimeout(() => {
-      this.voiceReadyTimers.delete(guildId);
+      this.voiceReadyTimers.delete(key);
       if (connection.state.status === VoiceConnectionStatus.Ready || connection.state.status === VoiceConnectionStatus.Destroyed) {
         return;
       }
@@ -995,12 +1066,12 @@ export class DiscordPlugin implements GiadaPlugin {
         status: connection.state.status,
         gateway: this.getVoiceGatewayDiagnostics(guildId)
       });
-      this.voiceReadyReconnectAttempts.set(guildId, (this.voiceReadyReconnectAttempts.get(guildId) ?? 0) + 1);
-      this.destroyVoiceBridge(guildId);
+      this.voiceReadyReconnectAttempts.set(key, (this.voiceReadyReconnectAttempts.get(key) ?? 0) + 1);
+      this.destroyVoiceBridge(guildId, channelId);
       this.destroyVoiceConnection(connection, guildId, channelId);
       this.scheduleVoiceRejoin(guildId, channelId, VOICE_REJOIN_DELAY_MS);
     }, VOICE_READY_TIMEOUT_MS);
-    this.voiceReadyTimers.set(guildId, timer);
+    this.voiceReadyTimers.set(key, timer);
     connection.once(VoiceConnectionStatus.Ready, clearReadyTimer);
     connection.once(VoiceConnectionStatus.Destroyed, clearReadyTimer);
     queueMicrotask(() => {
@@ -1023,16 +1094,17 @@ export class DiscordPlugin implements GiadaPlugin {
   }
 
   private scheduleVoiceRejoin(guildId: string, channelId: string, delayMs: number) {
-    if (this.voiceRejoinTimers.has(guildId)) {
+    const key = voiceBridgeKey(guildId, channelId);
+    if (this.voiceRejoinTimers.has(key)) {
       return;
     }
     const timer = setTimeout(() => {
-      this.voiceRejoinTimers.delete(guildId);
+      this.voiceRejoinTimers.delete(key);
       if (this.countHumanVoiceMembers(guildId, channelId) > 0) {
         void this.joinVoice(guildId, channelId);
       }
     }, delayMs);
-    this.voiceRejoinTimers.set(guildId, timer);
+    this.voiceRejoinTimers.set(key, timer);
   }
 
   private warnIfVoicePermissionsAreMissing(guildId: string, channelId: string, botUserId: string) {
@@ -1105,7 +1177,7 @@ export class DiscordPlugin implements GiadaPlugin {
       diagnostics.lastNewStatus = newState.status;
       diagnostics.lastReason = 'reason' in newState ? newState.reason : null;
       diagnostics.lastCloseCode = 'closeCode' in newState ? newState.closeCode : null;
-      logger.info('Discord voice connection state changed', {
+      logger.debug('Discord voice connection state changed', {
         guildId,
         channelId,
         oldStatus: oldState.status,
@@ -1236,8 +1308,7 @@ export class DiscordPlugin implements GiadaPlugin {
 
   private async restoreWatchedVoiceConnections() {
     for (const guild of this.client?.guilds.cache.values() ?? []) {
-      const channelId = this.settings.get(guild.id).voiceWatchChannelId;
-      if (channelId) {
+      for (const channelId of this.settings.get(guild.id).voiceWatchChannelIds) {
         await this.joinWatchedVoiceIfNeeded(guild.id, channelId);
       }
     }
@@ -1254,27 +1325,27 @@ export class DiscordPlugin implements GiadaPlugin {
 
   private async reconcileWatchedVoiceConnections() {
     for (const guild of this.client?.guilds.cache.values() ?? []) {
-      const channelId = this.settings.get(guild.id).voiceWatchChannelId;
-      if (!channelId) {
-        continue;
+      for (const channelId of this.settings.get(guild.id).voiceWatchChannelIds) {
+        await this.joinWatchedVoiceIfNeeded(guild.id, channelId);
+        this.leaveWatchedVoiceIfEmpty(guild.id, channelId);
       }
-      await this.joinWatchedVoiceIfNeeded(guild.id, channelId);
-      this.leaveWatchedVoiceIfEmpty(guild.id, channelId);
     }
   }
 
-  private getVoiceBridge(guildId: string, botUserId: string) {
-    let bridge = this.voiceBridges.get(guildId);
+  private getVoiceBridge(guildId: string, channelId: string, botUserId: string) {
+    const key = voiceBridgeKey(guildId, channelId);
+    let bridge = this.voiceBridges.get(key);
     if (!bridge) {
       bridge = new DiscordVoiceBridge(
         guildId,
+        channelId,
         botUserId,
         (userId) => this.resolveVoiceSpeakerName(guildId, userId),
         this.config,
         this.memory,
         this.personality
       );
-      this.voiceBridges.set(guildId, bridge);
+      this.voiceBridges.set(key, bridge);
     }
     return bridge;
   }
@@ -1307,23 +1378,46 @@ export class DiscordPlugin implements GiadaPlugin {
       ?? `Discord user ${userId}`;
   }
 
-  private destroyVoiceBridge(guildId: string) {
-    const bridge = this.voiceBridges.get(guildId);
-    const timer = this.voiceReadyTimers.get(guildId);
+  private destroyVoiceBridge(guildId: string, channelId: string) {
+    const key = voiceBridgeKey(guildId, channelId);
+    const bridge = this.voiceBridges.get(key);
+    const timer = this.voiceReadyTimers.get(key);
     if (timer) {
       clearTimeout(timer);
-      this.voiceReadyTimers.delete(guildId);
+      this.voiceReadyTimers.delete(key);
     }
-    const rejoinTimer = this.voiceRejoinTimers.get(guildId);
+    const rejoinTimer = this.voiceRejoinTimers.get(key);
     if (rejoinTimer) {
       clearTimeout(rejoinTimer);
-      this.voiceRejoinTimers.delete(guildId);
+      this.voiceRejoinTimers.delete(key);
     }
     if (!bridge) {
       return;
     }
     bridge.destroy();
-    this.voiceBridges.delete(guildId);
+    this.voiceBridges.delete(key);
+  }
+
+  private destroyAllVoiceBridgesForGuild(guildId: string) {
+    for (const key of [...this.voiceBridges.keys()]) {
+      const parsed = parseVoiceBridgeKey(key);
+      if (parsed?.guildId === guildId) {
+        this.destroyVoiceBridge(parsed.guildId, parsed.channelId);
+      }
+    }
+  }
+
+  private getMusicControllerForChannel(guildId: string, channelId: string) {
+    const directBridge = this.voiceBridges.get(voiceBridgeKey(guildId, channelId));
+    if (directBridge) {
+      return directBridge;
+    }
+    const connection = getVoiceConnection(guildId);
+    const voiceChannelId = connection?.joinConfig.channelId;
+    if (connection?.state.status === VoiceConnectionStatus.Ready && voiceChannelId === channelId) {
+      return this.voiceBridges.get(voiceBridgeKey(guildId, voiceChannelId));
+    }
+    return undefined;
   }
 
   private unsuppressStageVoiceIfNeeded(guildId: string, channelId: string) {
@@ -1576,9 +1670,9 @@ export class DiscordPlugin implements GiadaPlugin {
   private helpText() {
     return [
       '`/giada listen mode:here` - watch this text channel and reply when it makes sense.',
-      '`/giada listen mode:off` - only reply when named or mentioned.',
-      '`/giada voice mode:watch` - watch your current voice channel and auto-join when people enter.',
-      '`/giada voice mode:off` - disable voice watching.',
+      '`/giada listen mode:off` - stop watching this text channel.',
+      '`/giada voice mode:watch` - watch your current voice channel and auto-join when people enter. One voice channel can be active per server.',
+      '`/giada voice mode:off` - disable watching for the active or selected voice channel.',
       '`/giada voice mode:join` - join your current voice channel now.',
       '`/giada status` - show current Discord settings.',
       '`/giada authorize user:@user` - allow a user to run Giada commands. Administrator or owner only.',
@@ -1590,8 +1684,8 @@ export class DiscordPlugin implements GiadaPlugin {
     const settings = this.settings.get(guildId);
     const authorizedUsers = this.settings.listAuthorizedUsers(guildId);
     return [
-      `Listening channel: ${settings.listeningChannelId ? `<#${settings.listeningChannelId}>` : 'off'}`,
-      `Voice watch channel: ${settings.voiceWatchChannelId ? `<#${settings.voiceWatchChannelId}>` : 'off'}`,
+      `Listening channels: ${settings.listeningChannelIds.length ? settings.listeningChannelIds.map((channelId) => `<#${channelId}>`).join(', ') : 'off'}`,
+      `Voice watch channels: ${settings.voiceWatchChannelIds.length ? settings.voiceWatchChannelIds.map((channelId) => `<#${channelId}>`).join(', ') : 'off'}`,
       `Authorized command user IDs: ${authorizedUsers.length ? authorizedUsers.map((user) => user.userId).join(', ') : 'none'}`,
       `Owner bypass user ID: ${DISCORD_COMMAND_OWNER_USER_ID}`
     ].join('\n');
@@ -1693,6 +1787,18 @@ function isVoiceTextChannelMessage(message: Message, voiceChannelId: string) {
   return message.channelId === voiceChannelId
     || getThreadParentId(message.channel) === voiceChannelId
     || getChannelParentId(message.channel) === voiceChannelId;
+}
+
+function voiceBridgeKey(guildId: string, channelId: string) {
+  return `${guildId}:${channelId}`;
+}
+
+function parseVoiceBridgeKey(key: string) {
+  const [guildId, channelId] = key.split(':');
+  if (!guildId || !channelId) {
+    return null;
+  }
+  return { guildId, channelId };
 }
 
 function getThreadParent(value: unknown) {

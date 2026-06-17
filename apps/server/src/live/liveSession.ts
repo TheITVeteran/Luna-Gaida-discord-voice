@@ -15,7 +15,7 @@ import {
 import type { AppConfig } from '../config/env.js';
 import type { MemoryRepository } from '../memory/repository.js';
 import type { PersonalityService } from '../personality/service.js';
-import { createToolRegistry, type RegisteredTool } from '../tools/registry.js';
+import { createToolRegistry, isToolAvailableForSurface, type MusicController, type RegisteredTool, type ToolContext } from '../tools/registry.js';
 import { logger } from '../logging/logger.js';
 
 export type LiveSurface = 'desktop' | 'discord' | 'browser';
@@ -53,7 +53,8 @@ export class LiveSessionManager {
   constructor(
     private readonly config: AppConfig,
     private readonly memory: MemoryRepository,
-    private readonly personality: PersonalityService
+    private readonly personality: PersonalityService,
+    private readonly toolContextProviders: { music?: MusicController; memoryTags?: string[] } = {}
   ) {
     this.ai = config.GEMINI_API_KEY
       ? new GoogleGenAI({ apiKey: config.GEMINI_API_KEY, httpOptions: { apiVersion: config.GEMINI_API_VERSION } })
@@ -157,15 +158,16 @@ export class LiveSessionManager {
     const openedSessionId = this.sessionId + 1;
     this.sessionId = openedSessionId;
     const memoryContext = this.memory
-      .listForContext(surface)
+      .listForContext(surface, 20, this.toolContextProviders.memoryTags ?? [])
       .map((record) => `- [${record.privacy}/${record.source}] ${record.summary ?? record.content}`)
       .join('\n');
     const systemInstruction = [
       this.personality.buildInstruction(memoryContext, surface),
       surface === 'discord'
         ? [
-          `You are speaking in a Discord voice channel. Always reply in Italian (${this.config.GIADA_DEFAULT_LANGUAGE}) unless the user explicitly asks for or speaks another language.`,
-          'If the audio transcription looks like the wrong language, assume the user is still speaking Italian and answer in Italian.',
+          `You are speaking in a Discord voice channel. Always reply in ${this.config.GIADA_DEFAULT_LANGUAGE} unless the user explicitly asks for or speaks another language.`,
+          `If the audio transcription looks like the wrong language, assume the user is still speaking ${this.config.GIADA_DEFAULT_LANGUAGE} and answer in ${this.config.GIADA_DEFAULT_LANGUAGE}.`,
+          'When users ask you to play, search for, pause, resume, stop, seek, or change music volume in voice, use the Discord music tools instead of describing how to do it.',
           'Be concise and respond after each completed user voice turn.'
         ].join(' ')
         : null
@@ -302,7 +304,9 @@ export class LiveSessionManager {
           }
         },
         {
-          functionDeclarations: this.tools.map((tool) => normalizeDeclaration(tool.declaration))
+              functionDeclarations: this.tools
+                .filter((tool) => isToolAvailableForSurface(tool, surface))
+                .map((tool) => normalizeDeclaration(tool.declaration))
         }
       ]
     } as LiveConnectConfig;
@@ -334,18 +338,36 @@ export class LiveSessionManager {
     if (message.toolCall?.functionCalls?.length) {
       const functionResponses: Record<string, unknown>[] = [];
       for (const call of message.toolCall.functionCalls) {
-        const tool = this.tools.find((candidate) => candidate.declaration.name === call.name);
+        const tool = this.tools.find((candidate) => candidate.declaration.name === call.name && isToolAvailableForSurface(candidate, surface));
         const id = call.id ?? `${call.name ?? 'tool'}-${functionResponses.length}`;
         const name = call.name ?? 'unknown';
         if (!tool) {
+          logger.warn('Gemini Live requested unknown tool', {
+            surface,
+            name
+          });
           functionResponses.push({ id, name, response: { error: 'unknown_tool' } });
           continue;
         }
         try {
-          const response = await tool.run(call.args, {
+          const toolContext: ToolContext = {
             surface,
             memory: this.memory,
             emitClientEvent: (event) => this.emit?.(event as LiveClientEvent)
+          };
+          if (this.toolContextProviders.music) {
+            toolContext.music = this.toolContextProviders.music;
+          }
+          logger.info('Gemini Live requested tool', {
+            surface,
+            name,
+            musicControllerAvailable: Boolean(toolContext.music)
+          });
+          const response = await tool.run(call.args, toolContext);
+          logger.info('Gemini Live tool completed', {
+            surface,
+            name,
+            response: summarizeToolResponse(response)
           });
           const functionResponse: Record<string, unknown> = {
             id,
@@ -357,6 +379,11 @@ export class LiveSessionManager {
           }
           functionResponses.push(functionResponse);
         } catch (error) {
+          logger.warn('Gemini Live tool failed', {
+            surface,
+            name,
+            error: error instanceof Error ? error.message : String(error)
+          });
           functionResponses.push({
             id,
             name,
@@ -376,6 +403,16 @@ export class LiveSessionManager {
 function normalizeDeclaration(declaration: Record<string, unknown>) {
   void Type;
   return structuredClone(declaration) as Record<string, unknown>;
+}
+
+function summarizeToolResponse(response: Record<string, unknown>) {
+  const summary: Record<string, unknown> = {};
+  for (const key of ['ok', 'error', 'blocked', 'reason', 'title', 'url', 'durationSeconds', 'stopped']) {
+    if (key in response) {
+      summary[key] = response[key];
+    }
+  }
+  return Object.keys(summary).length ? summary : { keys: Object.keys(response) };
 }
 
 function extractAudioParts(message: LiveServerMessage): Array<{ data: string; mimeType: 'audio/pcm;rate=24000' }> {

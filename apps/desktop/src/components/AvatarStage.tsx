@@ -2,7 +2,6 @@ import { useEffect, useRef } from 'react';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
-import { currentMonitor, getCurrentWindow, LogicalPosition, LogicalSize } from '@tauri-apps/api/window';
 import {
   MToonMaterialLoaderPlugin,
   VRMExpressionPresetName,
@@ -38,6 +37,8 @@ const animationByState: Record<CompanionState, string> = {
   speaking: '/assets/animations/Idle.fbx',
   reacting: '/assets/animations/Angry.fbx'
 };
+
+const FLOATING_REPAINT_ALPHA = 1 / 255;
 
 interface LoadedAvatarModel {
   modelName: string;
@@ -103,10 +104,6 @@ class AvatarRuntime {
   private readonly bounds = new THREE.Box3();
   private readonly boundsSize = new THREE.Vector3();
   private readonly boundsCenter = new THREE.Vector3();
-  private fitInProgress = false;
-  private lastFitAt = 0;
-  private envelopeWidth = 0;
-  private envelopeHeight = 0;
   private modelChangeRotation: { startedAt: number; durationMs: number } | null = null;
   private transitionParticles: THREE.Points<THREE.BufferGeometry, THREE.PointsMaterial> | null = null;
   private transitionParticleVelocities: Float32Array | null = null;
@@ -122,9 +119,10 @@ class AvatarRuntime {
     });
     this.renderer.autoClear = true;
     this.renderer.setPixelRatio(window.devicePixelRatio);
-    this.renderer.setClearColor(0x000000, floating ? 0.001 : 0);
+    this.renderer.setClearColor(0x000000, floating ? FLOATING_REPAINT_ALPHA : 0);
+    this.renderer.setClearAlpha(floating ? FLOATING_REPAINT_ALPHA : 0);
     this.renderer.domElement.style.display = 'block';
-    this.renderer.domElement.style.background = 'transparent';
+    this.renderer.domElement.style.background = floating ? `rgba(0, 0, 0, ${FLOATING_REPAINT_ALPHA})` : 'transparent';
     this.container.appendChild(this.renderer.domElement);
     this.camera.position.set(0, 1.35, 4.2);
     this.scene.add(new THREE.AmbientLight(0xffffff, 1.2));
@@ -331,11 +329,19 @@ class AvatarRuntime {
     this.applyExpressionLayer();
     this.currentVrm?.update(delta);
     this.frameCameraToAvatar();
-    this.fitFloatingWindowToAvatar();
     this.frame = requestAnimationFrame(this.animate);
-    this.renderer.clear(true, true, true);
+    this.clearAvatarFrame();
     this.renderer.render(this.scene, this.camera);
   };
+
+  private clearAvatarFrame() {
+    const size = this.renderer.getSize(new THREE.Vector2());
+    this.renderer.setViewport(0, 0, size.x, size.y);
+    this.renderer.setScissorTest(false);
+    this.renderer.setClearColor(0x000000, this.floating ? FLOATING_REPAINT_ALPHA : 0);
+    this.renderer.setClearAlpha(this.floating ? FLOATING_REPAINT_ALPHA : 0);
+    this.renderer.clear(true, true, true);
+  }
 
   private updateModelChangeRotation() {
     if (!this.modelChangeRotation || !this.currentVrm) {
@@ -476,46 +482,6 @@ class AvatarRuntime {
 
     this.camera.position.set(0, 1.35, 4.2);
     this.camera.lookAt(0, 1.25, 0);
-  }
-
-  private fitFloatingWindowToAvatar() {
-    if (!this.floating || this.fitInProgress) {
-      return;
-    }
-
-    const now = performance.now();
-    if (now - this.lastFitAt < 180 || this.boundsSize.y <= 0 || this.boundsSize.x <= 0) {
-      return;
-    }
-    this.lastFitAt = now;
-
-    const pixelsPerWorldUnit = 430;
-    const targetWidthRaw = clamp(Math.ceil(this.boundsSize.x * pixelsPerWorldUnit + 48), 132, 360);
-    const targetHeightRaw = clamp(Math.ceil(this.boundsSize.y * pixelsPerWorldUnit + 18), 420, 720);
-    if (targetWidthRaw > this.envelopeWidth) this.envelopeWidth = targetWidthRaw;
-    if (targetHeightRaw > this.envelopeHeight) this.envelopeHeight = targetHeightRaw;
-
-    const targetWidth = Math.ceil(this.envelopeWidth);
-    const targetHeight = Math.ceil(this.envelopeHeight);
-    if (Math.abs(window.innerWidth - targetWidth) < 8 && Math.abs(window.innerHeight - targetHeight) < 8) {
-      return;
-    }
-
-    this.fitInProgress = true;
-    const win = getCurrentWindow();
-    void currentMonitor()
-      .then(async (monitor) => {
-        await win.setSize(new LogicalSize(targetWidth, targetHeight));
-        if (monitor) {
-          const scale = monitor.scaleFactor || window.devicePixelRatio || 1;
-          const x = (monitor.workArea.position.x + monitor.workArea.size.width - targetWidth * scale - 12) / scale;
-          const y = (monitor.workArea.position.y + monitor.workArea.size.height - targetHeight * scale) / scale;
-          await win.setPosition(new LogicalPosition(Math.max(0, x), y));
-        }
-      })
-      .finally(() => {
-        this.fitInProgress = false;
-      });
   }
 
   private updateBlink(delta: number) {

@@ -6,11 +6,34 @@ export interface ToolContext {
   surface: 'desktop' | 'discord' | 'browser';
   memory: MemoryRepository;
   emitClientEvent?: (event: unknown) => void;
+  music?: MusicController;
 }
 
 export interface RegisteredTool {
   declaration: Record<string, unknown>;
   run(args: unknown, context: ToolContext): Promise<Record<string, unknown>>;
+}
+
+export interface MusicController {
+  playSong(query: string, options?: { volume?: number }): Promise<Record<string, unknown>>;
+  pauseMusic(): Promise<Record<string, unknown>>;
+  resumeMusic(): Promise<Record<string, unknown>>;
+  stopMusic(): Promise<Record<string, unknown>>;
+  seekMusic(positionSeconds: number): Promise<Record<string, unknown>>;
+  setMusicVolume(volume: number): Promise<Record<string, unknown>>;
+  getMusicStatus(): Record<string, unknown>;
+}
+
+const discordDisabledToolNames = new Set([
+  'changeExpression',
+  'setAvatarState',
+  'getAvailableModels',
+  'changeModel'
+]);
+
+export function isToolAvailableForSurface(tool: RegisteredTool, surface: ToolContext['surface']) {
+  const name = tool.declaration.name;
+  return !(surface === 'discord' && typeof name === 'string' && discordDisabledToolNames.has(name));
 }
 
 const writeMemorySchema = z.object({
@@ -30,6 +53,19 @@ const animationSchema = z.object({
 
 const modelSchema = z.object({
   modelName: z.string().min(1).max(120)
+});
+
+const playSongSchema = z.object({
+  query: z.string().min(1).max(300),
+  volume: z.number().min(0).max(1).optional()
+});
+
+const musicVolumeSchema = z.object({
+  volume: z.number().min(0).max(1)
+});
+
+const musicSeekSchema = z.object({
+  positionSeconds: z.number().min(0).max(24 * 60 * 60)
 });
 
 const availableModels = ['AI_Maid', 'AI_Casual', 'AI_Future', 'AI_Military', 'AI_Party', 'AI_Nude'];
@@ -150,6 +186,135 @@ export function createToolRegistry(): RegisteredTool[] {
         }
         context.emitClientEvent?.({ type: 'avatar.model.change', payload: { modelName: normalized } });
         return { ok: true, modelName: normalized };
+      }
+    },
+    {
+      declaration: {
+        name: 'playSong',
+        description: 'Search for a requested song or YouTube URL and play it in the current Discord voice channel. Use only when the user asks for music/audio playback.',
+        parameters: {
+          type: 'OBJECT',
+          properties: {
+            query: { type: 'STRING', description: 'Song title, artist, search terms, or a direct YouTube URL.' },
+            volume: { type: 'NUMBER', description: 'Optional music volume from 0 to 1.' }
+          },
+          required: ['query']
+        }
+      },
+      async run(args, context) {
+        if (context.surface !== 'discord' || !context.music) {
+          return { ok: false, error: 'music_playback_requires_discord_voice' };
+        }
+        const parsed = playSongSchema.parse(args);
+        const options: { volume?: number } = {};
+        if (parsed.volume !== undefined) {
+          options.volume = parsed.volume;
+        }
+        return context.music.playSong(parsed.query, options);
+      }
+    },
+    {
+      declaration: {
+        name: 'stopMusic',
+        description: 'Stop the currently playing Discord voice music, if any.',
+        parameters: {
+          type: 'OBJECT',
+          properties: {}
+        }
+      },
+      async run(_args, context) {
+        if (context.surface !== 'discord' || !context.music) {
+          return { ok: false, error: 'music_playback_requires_discord_voice' };
+        }
+        return context.music.stopMusic();
+      }
+    },
+    {
+      declaration: {
+        name: 'pauseMusic',
+        description: 'Pause the currently playing Discord voice music without leaving voice.',
+        parameters: {
+          type: 'OBJECT',
+          properties: {}
+        }
+      },
+      async run(_args, context) {
+        if (context.surface !== 'discord' || !context.music) {
+          return { ok: false, error: 'music_playback_requires_discord_voice' };
+        }
+        return context.music.pauseMusic();
+      }
+    },
+    {
+      declaration: {
+        name: 'resumeMusic',
+        description: 'Resume paused Discord voice music.',
+        parameters: {
+          type: 'OBJECT',
+          properties: {}
+        }
+      },
+      async run(_args, context) {
+        if (context.surface !== 'discord' || !context.music) {
+          return { ok: false, error: 'music_playback_requires_discord_voice' };
+        }
+        return context.music.resumeMusic();
+      }
+    },
+    {
+      declaration: {
+        name: 'seekMusic',
+        description: 'Seek the current Discord voice music to a specific timestamp in seconds. For 1 minute 30 seconds, pass 90.',
+        parameters: {
+          type: 'OBJECT',
+          properties: {
+            positionSeconds: { type: 'NUMBER', description: 'Target playback position in seconds from the start of the track.' }
+          },
+          required: ['positionSeconds']
+        }
+      },
+      async run(args, context) {
+        if (context.surface !== 'discord' || !context.music) {
+          return { ok: false, error: 'music_playback_requires_discord_voice' };
+        }
+        const parsed = musicSeekSchema.parse(args);
+        return context.music.seekMusic(parsed.positionSeconds);
+      }
+    },
+    {
+      declaration: {
+        name: 'setMusicVolume',
+        description: 'Set Discord voice music volume from 0 to 1 without changing assistant speech volume.',
+        parameters: {
+          type: 'OBJECT',
+          properties: {
+            volume: { type: 'NUMBER', description: 'Music volume from 0 muted to 1 full volume.' }
+          },
+          required: ['volume']
+        }
+      },
+      async run(args, context) {
+        if (context.surface !== 'discord' || !context.music) {
+          return { ok: false, error: 'music_playback_requires_discord_voice' };
+        }
+        const parsed = musicVolumeSchema.parse(args);
+        return context.music.setMusicVolume(parsed.volume);
+      }
+    },
+    {
+      declaration: {
+        name: 'getMusicStatus',
+        description: 'Return the current Discord voice music playback status.',
+        parameters: {
+          type: 'OBJECT',
+          properties: {}
+        }
+      },
+      async run(_args, context) {
+        if (context.surface !== 'discord' || !context.music) {
+          return { ok: false, error: 'music_playback_requires_discord_voice' };
+        }
+        return context.music.getMusicStatus();
       }
     }
   ];

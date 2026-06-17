@@ -4,8 +4,8 @@ import { mkdirSync } from 'node:fs';
 
 export interface DiscordGuildSettings {
   guildId: string;
-  listeningChannelId: string | null;
-  voiceWatchChannelId: string | null;
+  listeningChannelIds: string[];
+  voiceWatchChannelIds: string[];
 }
 
 export interface DiscordUserIdentity {
@@ -51,6 +51,18 @@ export class DiscordSettingsStore {
         voice_watch_channel_id TEXT,
         updated_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS discord_listening_channels (
+        guild_id TEXT NOT NULL,
+        channel_id TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (guild_id, channel_id)
+      );
+      CREATE TABLE IF NOT EXISTS discord_voice_watch_channels (
+        guild_id TEXT NOT NULL,
+        channel_id TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (guild_id, channel_id)
+      );
       CREATE TABLE IF NOT EXISTS discord_user_identities (
         guild_id TEXT NOT NULL,
         user_id TEXT NOT NULL,
@@ -71,22 +83,77 @@ export class DiscordSettingsStore {
 
   get(guildId: string): DiscordGuildSettings {
     const row = this.db.prepare('SELECT * FROM discord_guild_settings WHERE guild_id = ?').get(guildId) as DiscordSettingsRow | undefined;
-    if (!row) {
-      return { guildId, listeningChannelId: null, voiceWatchChannelId: null };
+    const listeningChannelIds = this.listListeningChannels(guildId);
+    const voiceWatchChannelIds = this.listVoiceWatchChannels(guildId);
+    if (row?.listening_channel_id && !listeningChannelIds.includes(row.listening_channel_id)) {
+      listeningChannelIds.push(row.listening_channel_id);
+    }
+    if (row?.voice_watch_channel_id && !voiceWatchChannelIds.includes(row.voice_watch_channel_id)) {
+      voiceWatchChannelIds.push(row.voice_watch_channel_id);
     }
     return {
-      guildId: row.guild_id,
-      listeningChannelId: row.listening_channel_id,
-      voiceWatchChannelId: row.voice_watch_channel_id
+      guildId,
+      listeningChannelIds,
+      voiceWatchChannelIds
     };
   }
 
-  setListeningChannel(guildId: string, channelId: string | null) {
-    this.upsert(guildId, { listeningChannelId: channelId });
+  addListeningChannel(guildId: string, channelId: string) {
+    this.db.prepare(`
+      INSERT INTO discord_listening_channels (guild_id, channel_id, updated_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(guild_id, channel_id) DO UPDATE SET updated_at = excluded.updated_at
+    `).run(guildId, channelId, new Date().toISOString());
+    this.upsertLegacy(guildId, { listeningChannelId: channelId });
   }
 
-  setVoiceWatchChannel(guildId: string, channelId: string | null) {
-    this.upsert(guildId, { voiceWatchChannelId: channelId });
+  removeListeningChannel(guildId: string, channelId: string) {
+    this.db.prepare('DELETE FROM discord_listening_channels WHERE guild_id = ? AND channel_id = ?').run(guildId, channelId);
+    const next = this.listListeningChannels(guildId)[0] ?? null;
+    this.upsertLegacy(guildId, { listeningChannelId: next });
+  }
+
+  clearListeningChannels(guildId: string) {
+    this.db.prepare('DELETE FROM discord_listening_channels WHERE guild_id = ?').run(guildId);
+    this.upsertLegacy(guildId, { listeningChannelId: null });
+  }
+
+  addVoiceWatchChannel(guildId: string, channelId: string) {
+    this.db.prepare(`
+      INSERT INTO discord_voice_watch_channels (guild_id, channel_id, updated_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(guild_id, channel_id) DO UPDATE SET updated_at = excluded.updated_at
+    `).run(guildId, channelId, new Date().toISOString());
+    this.upsertLegacy(guildId, { voiceWatchChannelId: channelId });
+  }
+
+  removeVoiceWatchChannel(guildId: string, channelId: string) {
+    this.db.prepare('DELETE FROM discord_voice_watch_channels WHERE guild_id = ? AND channel_id = ?').run(guildId, channelId);
+    const next = this.listVoiceWatchChannels(guildId)[0] ?? null;
+    this.upsertLegacy(guildId, { voiceWatchChannelId: next });
+  }
+
+  clearVoiceWatchChannels(guildId: string) {
+    this.db.prepare('DELETE FROM discord_voice_watch_channels WHERE guild_id = ?').run(guildId);
+    this.upsertLegacy(guildId, { voiceWatchChannelId: null });
+  }
+
+  listListeningChannels(guildId: string) {
+    const rows = this.db.prepare(`
+      SELECT channel_id FROM discord_listening_channels
+      WHERE guild_id = ?
+      ORDER BY updated_at DESC
+    `).all(guildId) as Array<{ channel_id: string }>;
+    return rows.map((row) => row.channel_id);
+  }
+
+  listVoiceWatchChannels(guildId: string) {
+    const rows = this.db.prepare(`
+      SELECT channel_id FROM discord_voice_watch_channels
+      WHERE guild_id = ?
+      ORDER BY updated_at DESC
+    `).all(guildId) as Array<{ channel_id: string }>;
+    return rows.map((row) => row.channel_id);
   }
 
   upsertUserIdentity(input: Omit<DiscordUserIdentity, 'updatedAt'>) {
@@ -150,12 +217,12 @@ export class DiscordSettingsStore {
     }));
   }
 
-  private upsert(guildId: string, patch: { listeningChannelId?: string | null; voiceWatchChannelId?: string | null }) {
-    const current = this.get(guildId);
+  private upsertLegacy(guildId: string, patch: { listeningChannelId?: string | null; voiceWatchChannelId?: string | null }) {
+    const row = this.db.prepare('SELECT * FROM discord_guild_settings WHERE guild_id = ?').get(guildId) as DiscordSettingsRow | undefined;
     const next = {
       guildId,
-      listeningChannelId: patch.listeningChannelId !== undefined ? patch.listeningChannelId : current.listeningChannelId,
-      voiceWatchChannelId: patch.voiceWatchChannelId !== undefined ? patch.voiceWatchChannelId : current.voiceWatchChannelId,
+      listeningChannelId: patch.listeningChannelId !== undefined ? patch.listeningChannelId : row?.listening_channel_id ?? null,
+      voiceWatchChannelId: patch.voiceWatchChannelId !== undefined ? patch.voiceWatchChannelId : row?.voice_watch_channel_id ?? null,
       updatedAt: new Date().toISOString()
     };
 

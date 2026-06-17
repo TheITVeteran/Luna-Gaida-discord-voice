@@ -92,6 +92,22 @@ Running slash commands requires Discord Administrator permission, explicit autho
 
 When Giada is connected and ready in a voice channel, she also watches that voice channel's built-in text chat. Messages there, and direct pings while she is connected to voice, are answered through the active voice connection instead of Discord text replies.
 
+When asked in Discord voice, Giada can search for and play music through the Live API tools `playSong`, `pauseMusic`, `resumeMusic`, `stopMusic`, `seekMusic`, `setMusicVolume`, and `getMusicStatus`. Playback uses local `yt-dlp` to resolve YouTube results and local `ffmpeg` to decode audio into the existing Discord PCM voice path, so install both commands on the backend host. Music is mixed with assistant speech and automatically ducked while Giada talks. Optional `.env` tuning:
+
+```bash
+YTDLP_BINARY=yt-dlp
+YTDLP_PLAYER_CLIENTS=android,web
+# Optional, useful when YouTube blocks anonymous media downloads:
+YTDLP_COOKIES_PATH=/path/to/youtube-cookies.txt
+# or:
+YTDLP_COOKIES_FROM_BROWSER=firefox
+FFMPEG_BINARY=ffmpeg
+DISCORD_MUSIC_VOLUME=0.35
+DISCORD_MUSIC_DUCK_VOLUME=0.12
+```
+
+Discord bot voice video or Go Live stream viewing is not implemented because the official discord.js/@discordjs/voice bot stack used here exposes voice audio receive/send, not supported video stream capture for bots.
+
 Slash command delivery is supported in two modes:
 
 - Gateway mode: leave the Discord Developer Portal Interactions Endpoint URL empty and keep the backend bot process running.

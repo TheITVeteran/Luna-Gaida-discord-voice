@@ -75,7 +75,20 @@ export function attachRealtimeServer(server: Server, createLive: (context: Realt
         } else if (parsed.type === 'disconnect') {
           getLive(context).close();
         } else {
-          void getLive(context).handleInput(parsed, toLiveSurface(context));
+          void getLive(context).handleInput(parsed, toLiveSurface(context)).catch((error) => {
+            logger.warn('Realtime input handling failed', {
+              context,
+              type: parsed.type,
+              error: error instanceof Error ? error.message : String(error)
+            });
+            if (socket.readyState === socket.OPEN) {
+              socket.send(JSON.stringify({
+                type: 'status',
+                status: 'error',
+                reason: error instanceof Error ? error.message : String(error)
+              }));
+            }
+          });
         }
       } catch (error) {
         logger.warn('Rejected realtime client payload', error);

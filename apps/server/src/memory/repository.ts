@@ -84,15 +84,21 @@ export class MemoryRepository {
     return rows.map(mapRow);
   }
 
-  listForContext(surface: 'desktop' | 'discord' | 'browser', limit = 20): MemoryRecord[] {
+  listForContext(surface: 'desktop' | 'discord' | 'browser', limit = 20, tags: string[] = []): MemoryRecord[] {
     const privacyFilter = surface === 'discord' ? "privacy = 'public'" : "privacy IN ('public', 'private')";
+    const tagFilters = tags.map((_, index) => `tags LIKE @tag${index}`).join(' AND ');
     const rows = this.db.prepare(`
       SELECT * FROM memories
       WHERE ${privacyFilter}
         AND (expires_at IS NULL OR expires_at > @now)
+        ${tagFilters ? `AND ${tagFilters}` : ''}
       ORDER BY updated_at DESC
       LIMIT @limit
-    `).all({ now: new Date().toISOString(), limit }) as MemoryRow[];
+    `).all({
+      now: new Date().toISOString(),
+      limit,
+      ...Object.fromEntries(tags.map((tag, index) => [`tag${index}`, `%${tag}%`]))
+    }) as MemoryRow[];
     return rows.map(mapRow);
   }
 }

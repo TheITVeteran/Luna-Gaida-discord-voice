@@ -16,7 +16,7 @@ body {
 }
 
 body.avatar-window {
-  background: rgba(0, 0, 0, 0.001);
+  background: rgba(0, 0, 0, 0.004);
 }
 
 button,
@@ -170,20 +170,20 @@ button.active {
 html:has(body.avatar-window),
 body.avatar-window,
 body.avatar-window #root {
-  background: transparent;
+  background: rgba(0, 0, 0, 0.004);
 }
 
 .floating-shell {
   width: 100vw;
   height: 100vh;
-  background: rgba(0, 0, 0, 0.001);
+  background: rgba(0, 0, 0, 0.004);
   cursor: grab;
   contain: paint;
 }
 
 .avatar-stage.floating {
   min-height: 100vh;
-  background: transparent;
+  background: rgba(0, 0, 0, 0.004);
 }
 
 @media (max-width: 920px) {

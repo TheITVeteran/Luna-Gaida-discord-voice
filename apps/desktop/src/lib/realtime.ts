@@ -124,27 +124,30 @@ export class RealtimeClient extends EventTarget {
     if (!trimmed) {
       return;
     }
-    void this.connect().catch(() => undefined);
     this.dispatchEvent(new CustomEvent<RealtimeEvent>('event', {
       detail: { type: 'transcript', speaker: 'user', text: trimmed, final: true }
     }));
     const payload = { type: 'text', text: trimmed };
-    if (this.socket?.readyState === WebSocket.OPEN) {
-      this.send(payload);
-    } else {
-      this.socket?.addEventListener('open', () => this.send(payload), { once: true });
-    }
+    void this.connect()
+      .then(() => this.send(payload))
+      .catch((error) => {
+        this.dispatchEvent(new CustomEvent<RealtimeEvent>('event', {
+          detail: { type: 'status', status: 'offline', reason: error instanceof Error ? error.message : String(error) }
+        }));
+      });
   }
 
   setPassive(passive: boolean) {
-    void this.connect().catch(() => undefined);
-    this.send({ type: 'mode', passive });
+    void this.connect()
+      .then(() => this.send({ type: 'mode', passive }))
+      .catch(() => undefined);
   }
 
   interrupt() {
     this.player.stopQueuedAudio();
-    void this.connect().catch(() => undefined);
-    this.send({ type: 'interrupt' });
+    void this.connect()
+      .then(() => this.send({ type: 'interrupt' }))
+      .catch(() => undefined);
   }
 
   async startMicrophone() {
