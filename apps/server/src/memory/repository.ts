@@ -84,7 +84,7 @@ export class MemoryRepository {
     return rows.map(mapRow);
   }
 
-  listForContext(surface: 'desktop' | 'discord', limit = 20): MemoryRecord[] {
+  listForContext(surface: 'desktop' | 'discord' | 'browser', limit = 20): MemoryRecord[] {
     const privacyFilter = surface === 'discord' ? "privacy = 'public'" : "privacy IN ('public', 'private')";
     const rows = this.db.prepare(`
       SELECT * FROM memories

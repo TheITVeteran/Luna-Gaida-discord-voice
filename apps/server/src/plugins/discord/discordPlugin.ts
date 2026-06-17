@@ -14,7 +14,7 @@ import {
   type Message,
   type VoiceState
 } from 'discord.js';
-import { joinVoiceChannel, getVoiceConnection, type DiscordGatewayAdapterCreator } from '@discordjs/voice';
+import { VoiceConnectionStatus, joinVoiceChannel, getVoiceConnection, type DiscordGatewayAdapterCreator } from '@discordjs/voice';
 import { createPublicKey, verify } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { AppConfig } from '../../config/env.js';
@@ -36,6 +36,9 @@ import { DiscordVoiceBridge } from './voiceBridge.js';
 const MAX_DISCORD_IMAGE_ATTACHMENTS = 4;
 const MAX_DISCORD_IMAGE_BYTES = 8 * 1024 * 1024;
 const DISCORD_COMMAND_OWNER_USER_ID = '573903151472836609';
+const VOICE_WATCH_RECONCILE_MS = 15_000;
+const VOICE_READY_TIMEOUT_MS = 12_000;
+const VOICE_REJOIN_DELAY_MS = 3_000;
 
 const giadaCommand = new SlashCommandBuilder()
   .setName('giada')
@@ -137,12 +140,25 @@ interface DiscordHttpInteraction {
   user?: { id: string; username?: string };
 }
 
+interface DiscordVoiceGatewayDiagnostics {
+  voiceStateUpdates: number;
+  voiceServerUpdates: number;
+  lastVoiceStateUpdateAt: string | null;
+  lastVoiceServerUpdateAt: string | null;
+  lastBotVoiceChannelId: string | null;
+}
+
 export class DiscordPlugin implements GiadaPlugin {
   readonly name = 'discord';
   private client: Client | null = null;
   private readonly settings: DiscordSettingsStore;
   private readonly responder: DiscordTextResponder;
   private readonly voiceBridges = new Map<string, DiscordVoiceBridge>();
+  private voiceWatchReconcileInterval: ReturnType<typeof setInterval> | null = null;
+  private readonly voiceReadyTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly voiceRejoinTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly voiceReadyReconnectAttempts = new Map<string, number>();
+  private readonly voiceGatewayDiagnostics = new Map<string, DiscordVoiceGatewayDiagnostics>();
 
   constructor(
     private readonly config: AppConfig,
@@ -172,7 +188,7 @@ export class DiscordPlugin implements GiadaPlugin {
     this.client.on(Events.MessageCreate, (message) => {
       void this.handleMessage(message);
     });
-    this.client.on('raw', (packet: { t?: string; d?: { id?: string; type?: number; data?: { name?: string }; guild_id?: string } }) => {
+    this.client.on('raw', (packet: { t?: string; d?: { id?: string; type?: number; data?: { name?: string }; guild_id?: string; user_id?: string; channel_id?: string | null } }) => {
       if (packet.t === 'INTERACTION_CREATE') {
         logger.info('Received raw Discord INTERACTION_CREATE packet', {
           id: packet.d?.id,
@@ -180,6 +196,23 @@ export class DiscordPlugin implements GiadaPlugin {
           command: packet.d?.data?.name ?? null,
           guildId: packet.d?.guild_id ?? null
         });
+        return;
+      }
+
+      if (packet.t === 'VOICE_STATE_UPDATE' && packet.d?.guild_id) {
+        const diagnostics = this.getVoiceGatewayDiagnostics(packet.d.guild_id);
+        diagnostics.voiceStateUpdates += 1;
+        diagnostics.lastVoiceStateUpdateAt = new Date().toISOString();
+        if (packet.d.user_id === this.client?.user?.id) {
+          diagnostics.lastBotVoiceChannelId = packet.d.channel_id ?? null;
+        }
+        return;
+      }
+
+      if (packet.t === 'VOICE_SERVER_UPDATE' && packet.d?.guild_id) {
+        const diagnostics = this.getVoiceGatewayDiagnostics(packet.d.guild_id);
+        diagnostics.voiceServerUpdates += 1;
+        diagnostics.lastVoiceServerUpdateAt = new Date().toISOString();
       }
     });
     this.client.on(Events.InteractionCreate, (interaction) => {
@@ -216,6 +249,7 @@ export class DiscordPlugin implements GiadaPlugin {
       }
       void this.registerCommands();
       void this.restoreWatchedVoiceConnections();
+      this.startVoiceWatchReconciliation();
     });
     this.client.on(Events.GuildCreate, () => {
       void this.registerCommands();
@@ -232,6 +266,18 @@ export class DiscordPlugin implements GiadaPlugin {
   }
 
   async stop() {
+    if (this.voiceWatchReconcileInterval) {
+      clearInterval(this.voiceWatchReconcileInterval);
+      this.voiceWatchReconcileInterval = null;
+    }
+    for (const timer of this.voiceReadyTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.voiceReadyTimers.clear();
+    for (const timer of this.voiceRejoinTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.voiceRejoinTimers.clear();
     for (const bridge of this.voiceBridges.values()) {
       bridge.destroy();
     }
@@ -267,7 +313,28 @@ export class DiscordPlugin implements GiadaPlugin {
       guilds: [...(this.client?.guilds.cache.values() ?? [])].map((guild) => ({
         id: guild.id,
         name: guild.name
-      }))
+      })),
+      voiceWatch: [...(this.client?.guilds.cache.values() ?? [])]
+        .map((guild) => {
+          const channelId = this.settings.get(guild.id).voiceWatchChannelId;
+          if (!channelId) {
+            return null;
+          }
+          const connection = getVoiceConnection(guild.id);
+          return {
+            guildId: guild.id,
+            channelId,
+            humanMembers: this.countHumanVoiceMembers(guild.id, channelId),
+            connectedChannelId: connection?.joinConfig.channelId ?? null,
+            bridgeActive: this.voiceBridges.has(guild.id),
+            readyTimerActive: this.voiceReadyTimers.has(guild.id),
+            rejoinScheduled: this.voiceRejoinTimers.has(guild.id),
+            readyReconnectAttempts: this.voiceReadyReconnectAttempts.get(guild.id) ?? 0,
+            gateway: this.getVoiceGatewayDiagnostics(guild.id)
+          };
+        })
+        .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry)),
+      voiceBridges: [...this.voiceBridges.values()].map((bridge) => bridge.getStatus())
     };
   }
 
@@ -356,6 +423,7 @@ export class DiscordPlugin implements GiadaPlugin {
       mayStaySilent: listeningChannel && !addressed,
       reactionTargetMessageIds: context.reactionTargetMessageIds,
       addReaction: (messageId, emoji) => this.addReactionToContextMessage(message, context.reactionTargetMessageIds, messageId, emoji),
+      sendGif: (url, caption) => this.sendGifToMessageChannel(message, url, caption),
       knownUsers: this.settings.listUserIdentities(message.guildId).map((user) => ({
         userId: user.userId,
         username: user.username,
@@ -685,9 +753,7 @@ export class DiscordPlugin implements GiadaPlugin {
     const botUserId = this.client?.user?.id;
     const isBotVoiceState = Boolean(botUserId && oldState.id === botUserId);
     if (isBotVoiceState && oldState.channelId === watchedChannelId && newState.channelId !== watchedChannelId) {
-      setTimeout(() => {
-        void this.joinWatchedVoiceIfNeeded(guildId, watchedChannelId);
-      }, 1000);
+      this.scheduleVoiceRejoin(guildId, watchedChannelId, VOICE_REJOIN_DELAY_MS);
       return;
     }
 
@@ -704,6 +770,10 @@ export class DiscordPlugin implements GiadaPlugin {
   }
 
   private async joinWatchedVoiceIfNeeded(guildId: string, channelId: string) {
+    const guild = this.client?.guilds.cache.get(guildId);
+    if (guild) {
+      await guild.channels.fetch(channelId).catch(() => null);
+    }
     const humanMembers = this.countHumanVoiceMembers(guildId, channelId);
     if (humanMembers <= 0) {
       return;
@@ -737,9 +807,17 @@ export class DiscordPlugin implements GiadaPlugin {
     }
     const existingConnection = getVoiceConnection(guildId);
     if (existingConnection?.joinConfig.channelId === channelId) {
-      this.getVoiceBridge(guildId, botUserId).attach(existingConnection, channelId);
-      this.unsuppressStageVoiceIfNeeded(guildId, channelId);
-      return;
+      if (existingConnection.state.status === VoiceConnectionStatus.Destroyed) {
+        this.destroyVoiceBridge(guildId);
+      } else {
+        this.getVoiceBridge(guildId, botUserId).attach(existingConnection, channelId);
+        this.watchVoiceReady(guildId, channelId, existingConnection);
+        this.unsuppressStageVoiceIfNeeded(guildId, channelId);
+        return;
+      }
+    } else if (existingConnection) {
+      this.destroyVoiceBridge(guildId);
+      this.destroyVoiceConnection(existingConnection, guildId, channelId);
     }
     const connection = joinVoiceChannel({
       channelId,
@@ -749,7 +827,87 @@ export class DiscordPlugin implements GiadaPlugin {
       selfMute: false
     });
     this.getVoiceBridge(guildId, botUserId).attach(connection, channelId);
+    this.watchVoiceReady(guildId, channelId, connection);
     this.unsuppressStageVoiceIfNeeded(guildId, channelId);
+  }
+
+  private watchVoiceReady(guildId: string, channelId: string, connection: ReturnType<typeof joinVoiceChannel>) {
+    if (this.voiceReadyTimers.has(guildId)) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      this.voiceReadyTimers.delete(guildId);
+      if (connection.state.status === VoiceConnectionStatus.Ready || connection.state.status === VoiceConnectionStatus.Destroyed) {
+        return;
+      }
+      if (connection.joinConfig.channelId !== channelId || this.countHumanVoiceMembers(guildId, channelId) <= 0) {
+        return;
+      }
+      logger.warn('Discord voice connection did not become ready; reconnecting', {
+        guildId,
+        channelId,
+        status: connection.state.status
+      });
+      this.voiceReadyReconnectAttempts.set(guildId, (this.voiceReadyReconnectAttempts.get(guildId) ?? 0) + 1);
+      this.destroyVoiceBridge(guildId);
+      this.destroyVoiceConnection(connection, guildId, channelId);
+      this.scheduleVoiceRejoin(guildId, channelId, VOICE_REJOIN_DELAY_MS);
+    }, VOICE_READY_TIMEOUT_MS);
+    this.voiceReadyTimers.set(guildId, timer);
+    connection.once(VoiceConnectionStatus.Ready, () => {
+      const activeTimer = this.voiceReadyTimers.get(guildId);
+      if (activeTimer) {
+        clearTimeout(activeTimer);
+        this.voiceReadyTimers.delete(guildId);
+      }
+    });
+    connection.once(VoiceConnectionStatus.Destroyed, () => {
+      const activeTimer = this.voiceReadyTimers.get(guildId);
+      if (activeTimer) {
+        clearTimeout(activeTimer);
+        this.voiceReadyTimers.delete(guildId);
+      }
+    });
+  }
+
+  private destroyVoiceConnection(connection: ReturnType<typeof joinVoiceChannel>, guildId: string, channelId: string) {
+    try {
+      connection.destroy();
+    } catch (error) {
+      logger.warn('Failed to destroy Discord voice connection', {
+        guildId,
+        channelId,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
+
+  private scheduleVoiceRejoin(guildId: string, channelId: string, delayMs: number) {
+    if (this.voiceRejoinTimers.has(guildId)) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      this.voiceRejoinTimers.delete(guildId);
+      if (this.countHumanVoiceMembers(guildId, channelId) > 0) {
+        this.joinVoice(guildId, channelId);
+      }
+    }, delayMs);
+    this.voiceRejoinTimers.set(guildId, timer);
+  }
+
+  private getVoiceGatewayDiagnostics(guildId: string) {
+    let diagnostics = this.voiceGatewayDiagnostics.get(guildId);
+    if (!diagnostics) {
+      diagnostics = {
+        voiceStateUpdates: 0,
+        voiceServerUpdates: 0,
+        lastVoiceStateUpdateAt: null,
+        lastVoiceServerUpdateAt: null,
+        lastBotVoiceChannelId: null
+      };
+      this.voiceGatewayDiagnostics.set(guildId, diagnostics);
+    }
+    return diagnostics;
   }
 
   private countHumanVoiceMembers(guildId: string, channelId: string) {
@@ -770,6 +928,26 @@ export class DiscordPlugin implements GiadaPlugin {
       if (channelId) {
         await this.joinWatchedVoiceIfNeeded(guild.id, channelId);
       }
+    }
+  }
+
+  private startVoiceWatchReconciliation() {
+    if (this.voiceWatchReconcileInterval) {
+      return;
+    }
+    this.voiceWatchReconcileInterval = setInterval(() => {
+      void this.reconcileWatchedVoiceConnections();
+    }, VOICE_WATCH_RECONCILE_MS);
+  }
+
+  private async reconcileWatchedVoiceConnections() {
+    for (const guild of this.client?.guilds.cache.values() ?? []) {
+      const channelId = this.settings.get(guild.id).voiceWatchChannelId;
+      if (!channelId) {
+        continue;
+      }
+      await this.joinWatchedVoiceIfNeeded(guild.id, channelId);
+      this.leaveWatchedVoiceIfEmpty(guild.id, channelId);
     }
   }
 
@@ -819,6 +997,16 @@ export class DiscordPlugin implements GiadaPlugin {
 
   private destroyVoiceBridge(guildId: string) {
     const bridge = this.voiceBridges.get(guildId);
+    const timer = this.voiceReadyTimers.get(guildId);
+    if (timer) {
+      clearTimeout(timer);
+      this.voiceReadyTimers.delete(guildId);
+    }
+    const rejoinTimer = this.voiceRejoinTimers.get(guildId);
+    if (rejoinTimer) {
+      clearTimeout(rejoinTimer);
+      this.voiceRejoinTimers.delete(guildId);
+    }
     if (!bridge) {
       return;
     }
@@ -918,16 +1106,16 @@ export class DiscordPlugin implements GiadaPlugin {
         continue;
       }
       if (images.length >= MAX_DISCORD_IMAGE_ATTACHMENTS) {
-        summary.skippedReason = 'image skipped: image limit reached';
+        summary.skippedReason = 'visual media skipped: media limit reached';
         continue;
       }
       if (attachment.size > MAX_DISCORD_IMAGE_BYTES) {
-        summary.skippedReason = 'image skipped: too large';
+        summary.skippedReason = 'visual media skipped: too large';
         continue;
       }
       const image = await this.downloadImageAttachment(attachment, `${scope} ${attachment.name ?? attachment.id}`);
       if (!image) {
-        summary.skippedReason = 'image skipped: download failed';
+        summary.skippedReason = 'visual media skipped: download failed';
         continue;
       }
       summary.imageIncluded = true;
@@ -972,6 +1160,24 @@ export class DiscordPlugin implements GiadaPlugin {
       mimeType,
       data: bytes.toString('base64')
     };
+  }
+
+  private async sendGifToMessageChannel(message: Message, url: string, caption?: string) {
+    if (!('send' in message.channel) || typeof message.channel.send !== 'function') {
+      return { ok: false, error: 'channel_cannot_send_messages' };
+    }
+    const safeCaption = caption ? assertDiscordSafe(sanitizeForDiscord(caption)) : null;
+    if (safeCaption && !safeCaption.ok) {
+      return { ok: false, error: 'caption_failed_policy', reason: safeCaption.text };
+    }
+    const content = safeCaption?.text
+      ? `${clampDiscordMessage(safeCaption.text)}\n${url}`
+      : url;
+    await message.channel.send({
+      content,
+      allowedMentions: allowedMentionsForContent(content)
+    });
+    return { ok: true };
   }
 
   private formatContextMessage(message: Message, attachments: DiscordAttachmentSummary[] = this.summarizeAttachments(message)): DiscordContextMessage {
@@ -1179,7 +1385,7 @@ function isSupportedDiscordImage(attachment: Attachment) {
 
 function normalizeDiscordImageMimeType(contentType: string | null, nameOrUrl = '') {
   const normalized = contentType?.toLowerCase().split(';')[0]?.trim();
-  if (normalized && ['image/jpeg', 'image/png', 'image/webp'].includes(normalized)) {
+  if (normalized && ['image/jpeg', 'image/png', 'image/webp', 'image/gif'].includes(normalized)) {
     return normalized;
   }
   const lowerName = nameOrUrl.toLowerCase();
@@ -1192,12 +1398,20 @@ function normalizeDiscordImageMimeType(contentType: string | null, nameOrUrl = '
   if (lowerName.endsWith('.webp')) {
     return 'image/webp';
   }
+  if (lowerName.endsWith('.gif')) {
+    return 'image/gif';
+  }
   return null;
 }
 
 function clampContextText(text: string) {
   const normalized = text.replace(/\s+/g, ' ').trim();
   return normalized.length > 700 ? `${normalized.slice(0, 697)}...` : normalized;
+}
+
+function clampDiscordMessage(text: string) {
+  const normalized = text.replace(/\s+/g, ' ').trim();
+  return normalized.length > 1900 ? `${normalized.slice(0, 1897)}...` : normalized;
 }
 
 function allowedMentionsForContent(content: string) {

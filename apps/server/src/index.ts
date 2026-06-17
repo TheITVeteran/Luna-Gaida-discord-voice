@@ -13,7 +13,6 @@ const config = loadConfig();
 const app = Fastify({ logger: false });
 const memory = new MemoryRepository(config.databasePath);
 const personality = new PersonalityService(config.databasePath);
-const live = new LiveSessionManager(config, memory, personality);
 const plugins = new PluginManager();
 const discord = new DiscordPlugin(config, memory, personality);
 
@@ -49,7 +48,7 @@ const server = createServer((req, res) => {
   }
   void app.routing(req, res);
 });
-attachRealtimeServer(server, live);
+attachRealtimeServer(server, () => new LiveSessionManager(config, memory, personality));
 
 await app.ready();
 

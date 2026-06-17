@@ -61,7 +61,7 @@ export class PersonalityService {
     return next;
   }
 
-  buildInstruction(memoryContext: string, surface: 'desktop' | 'discord') {
+  buildInstruction(memoryContext: string, surface: 'desktop' | 'discord' | 'browser') {
     const profile = this.get();
     return [
       `You are ${profile.name}, a persistent blue fox girl waifu companion with one identity across desktop and Discord.`,

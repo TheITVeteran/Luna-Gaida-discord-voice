@@ -1,11 +1,12 @@
 import { WebSocketServer, type WebSocket } from 'ws';
 import type { Server } from 'node:http';
 import { z } from 'zod';
-import type { LiveSessionManager } from '../live/liveSession.js';
+import type { LiveSessionManager, LiveSurface } from '../live/liveSession.js';
 import { logger } from '../logging/logger.js';
 
+const realtimeSurfaceSchema = z.enum(['app', 'browser']).optional();
 const clientEventSchema = z.discriminatedUnion('type', [
-  z.object({ type: z.literal('connect') }),
+  z.object({ type: z.literal('connect'), surface: realtimeSurfaceSchema }),
   z.object({ type: z.literal('disconnect') }),
   z.object({ type: z.literal('text'), text: z.string().max(8000) }),
   z.object({ type: z.literal('audio'), data: z.string(), mimeType: z.string().optional() }),
@@ -14,44 +15,88 @@ const clientEventSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('interrupt') })
 ]);
 
-export function attachRealtimeServer(server: Server, live: LiveSessionManager) {
+type RealtimeContext = 'app' | 'browser';
+
+export function attachRealtimeServer(server: Server, createLive: (context: RealtimeContext) => LiveSessionManager) {
   const wss = new WebSocketServer({ server, path: '/realtime' });
-  const sockets = new Set<WebSocket>();
-  live.setEmitter((event) => {
-    for (const socket of sockets) {
-      if (socket.readyState === socket.OPEN) {
-        socket.send(JSON.stringify(event));
+  const sockets = new Map<WebSocket, RealtimeContext>();
+  const liveContexts = new Map<RealtimeContext, LiveSessionManager>();
+
+  const getLive = (context: RealtimeContext) => {
+    let live = liveContexts.get(context);
+    if (!live) {
+      live = createLive(context);
+      live.setEmitter((event) => {
+        for (const [socket, socketContext] of sockets) {
+          if (socketContext !== context) {
+            continue;
+          }
+          if (socket.readyState === socket.OPEN) {
+            socket.send(JSON.stringify(event));
+          }
+        }
+      });
+      liveContexts.set(context, live);
+    }
+    return live;
+  };
+
+  const closeContextIfIdle = (context: RealtimeContext) => {
+    for (const socketContext of sockets.values()) {
+      if (socketContext === context) {
+        return;
       }
     }
-  });
+    liveContexts.get(context)?.close();
+  };
+
+  const sendStatus = (socket: WebSocket, context: RealtimeContext) => {
+    getLive(context);
+    if (socket.readyState === socket.OPEN) {
+      socket.send(JSON.stringify({ type: 'status', status: 'offline', context }));
+    }
+  };
 
   wss.on('connection', (socket: WebSocket) => {
-    sockets.add(socket);
-    socket.send(JSON.stringify({ type: 'status', status: 'offline' }));
+    let context: RealtimeContext = 'app';
+    sockets.set(socket, context);
+    sendStatus(socket, context);
 
     socket.on('message', (raw) => {
       try {
         const parsed = clientEventSchema.parse(JSON.parse(raw.toString()));
         if (parsed.type === 'connect') {
-          void live.connect('desktop');
+          const nextContext = parsed.surface ?? 'app';
+          if (nextContext !== context) {
+            const previousContext = context;
+            context = nextContext;
+            sockets.set(socket, context);
+            closeContextIfIdle(previousContext);
+            sendStatus(socket, context);
+          }
+          void getLive(context).connect(toLiveSurface(context));
         } else if (parsed.type === 'disconnect') {
-          live.close();
+          getLive(context).close();
         } else {
-          void live.handleInput(parsed);
+          void getLive(context).handleInput(parsed, toLiveSurface(context));
         }
       } catch (error) {
         logger.warn('Rejected realtime client payload', error);
-        socket.send(JSON.stringify({ type: 'error', reason: 'invalid_payload' }));
+        if (socket.readyState === socket.OPEN) {
+          socket.send(JSON.stringify({ type: 'error', reason: 'invalid_payload' }));
+        }
       }
     });
 
     socket.on('close', () => {
       sockets.delete(socket);
-      if (sockets.size === 0) {
-        live.close();
-      }
+      closeContextIfIdle(context);
     });
   });
 
   return wss;
+}
+
+function toLiveSurface(context: RealtimeContext): LiveSurface {
+  return context === 'browser' ? 'browser' : 'desktop';
 }

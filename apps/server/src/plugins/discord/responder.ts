@@ -1,8 +1,21 @@
-import { GoogleGenAI, HarmBlockThreshold, HarmCategory, Modality, Type, type FunctionCall, type LiveConnectConfig, type LiveServerMessage, type Part, type Session } from '@google/genai';
+import {
+  DynamicRetrievalConfigMode,
+  GoogleGenAI,
+  HarmBlockThreshold,
+  HarmCategory,
+  Modality,
+  Type,
+  type FunctionCall,
+  type LiveConnectConfig,
+  type LiveServerMessage,
+  type Part,
+  type Session
+} from '@google/genai';
 import type { AppConfig } from '../../config/env.js';
 import type { MemoryRepository } from '../../memory/repository.js';
 import type { PersonalityService } from '../../personality/service.js';
 import { assertDiscordSafe, sanitizeForDiscord } from '../../policy/privacy.js';
+import { createToolRegistry, type RegisteredTool } from '../../tools/registry.js';
 
 export interface DiscordContextMessage {
   messageId: string;
@@ -53,10 +66,12 @@ interface DiscordReplyInput {
   mayStaySilent?: boolean;
   reactionTargetMessageIds?: string[];
   addReaction?: (messageId: string, emoji: string) => Promise<Record<string, unknown>>;
+  sendGif?: (url: string, caption?: string) => Promise<Record<string, unknown>>;
 }
 
 export class DiscordTextResponder {
   private readonly ai: GoogleGenAI | null;
+  private readonly tools: RegisteredTool[];
 
   constructor(
     private readonly config: AppConfig,
@@ -66,6 +81,7 @@ export class DiscordTextResponder {
     this.ai = config.GEMINI_API_KEY
       ? new GoogleGenAI({ apiKey: config.GEMINI_API_KEY, httpOptions: { apiVersion: config.GEMINI_API_VERSION } })
       : null;
+    this.tools = createToolRegistry();
   }
 
   async reply(input: DiscordReplyInput) {
@@ -86,9 +102,13 @@ export class DiscordTextResponder {
         ? 'You are in an always-listen channel, but that does not mean you should answer every message. If the current message is not directed at you and does not benefit from your input, reply with exactly [[GIADA_NO_REPLY]].'
         : 'The current message addressed you directly, so provide a useful reply.',
       'When image attachments are provided, inspect them directly and use their labels to connect each image to the current message or replied-to message.',
+      'When GIF attachments are provided, inspect them as visual media when possible. If only metadata is available, say what you can infer from the filename, URL, and conversation.',
       'You can see reaction summaries on recent messages. Use them as conversation context.',
       input.addReaction
         ? 'You have a tool named addDiscordReaction. Use it when adding an emoji reaction is more appropriate than, or useful in addition to, a text reply. Only react to message IDs shown in the current context. If a reaction is enough, use the tool and then reply with exactly [[GIADA_NO_REPLY]].'
+        : null,
+      input.sendGif
+        ? 'You have a tool named sendDiscordGif. Use it when the user asks for a GIF or when a GIF is clearly a better Discord response. Use direct http(s) GIF/image URLs only. If the GIF is enough, use the tool and then reply with exactly [[GIADA_NO_REPLY]].'
         : null,
       'You can ping a Discord user only when the user explicitly asks you to notify, tag, mention, or ping them.',
       'To ping a known user, write their mention exactly as <@USER_ID> using the user ID from Current known Discord users. Do not invent user IDs.',
@@ -129,6 +149,18 @@ export class DiscordTextResponder {
   }
 
   private async generateLiveTextReply(systemInstruction: string, parts: Part[], input: DiscordReplyInput) {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        return await this.generateLiveTextReplyOnce(systemInstruction, parts, input);
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    throw lastError;
+  }
+
+  private async generateLiveTextReplyOnce(systemInstruction: string, parts: Part[], input: DiscordReplyInput) {
     let session: Session | null = null;
     let settled = false;
     let transcriptText = '';
@@ -176,28 +208,20 @@ export class DiscordTextResponder {
           { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.OFF }
         ]
       };
-      if (input.addReaction) {
-        config.tools = [{
-          functionDeclarations: [{
-            name: 'addDiscordReaction',
-            description: 'Add one emoji reaction to a Discord message from the current context.',
-            parameters: {
-              type: Type.OBJECT,
-              properties: {
-                messageId: {
-                  type: Type.STRING,
-                  description: 'The target Discord message ID. Must be one of the message IDs shown in the current context.'
-                },
-                emoji: {
-                  type: Type.STRING,
-                  description: 'A Unicode emoji or custom emoji mention to react with, for example 👍 or <:name:id>.'
-                }
-              },
-              required: ['messageId', 'emoji']
-            }
-          }]
-        }];
-      }
+      config.tools = [
+        {
+          googleSearch: {},
+          googleSearchRetrieval: {
+            dynamicRetrievalConfig: { mode: DynamicRetrievalConfigMode.MODE_DYNAMIC }
+          }
+        },
+        {
+          functionDeclarations: [
+            ...this.tools.map((tool) => structuredClone(tool.declaration) as Record<string, unknown>),
+            ...discordToolDeclarations(input)
+          ]
+        }
+      ];
 
       session = await this.ai!.live.connect({
         model: this.config.GEMINI_MODEL,
@@ -240,6 +264,35 @@ export class DiscordTextResponder {
     for (const call of functionCalls) {
       const id = call.id ?? `${call.name ?? 'tool'}-${functionResponses.length}`;
       const name = call.name ?? 'unknown';
+      const sharedTool = this.tools.find((candidate) => candidate.declaration.name === name);
+      if (sharedTool) {
+        try {
+          const response = await sharedTool.run(call.args, {
+            surface: 'discord',
+            memory: this.memory
+          });
+          functionResponses.push({ id, name, response });
+        } catch (error) {
+          functionResponses.push({ id, name, response: { ok: false, error: error instanceof Error ? error.message : String(error) } });
+        }
+        continue;
+      }
+
+      if (name === 'sendDiscordGif' && input.sendGif) {
+        const args = parseGifArgs(call.args);
+        if (!args) {
+          functionResponses.push({ id, name, response: { ok: false, error: 'invalid_arguments' } });
+          continue;
+        }
+        try {
+          const response = await input.sendGif(args.url, args.caption);
+          functionResponses.push({ id, name, response });
+        } catch (error) {
+          functionResponses.push({ id, name, response: { ok: false, error: error instanceof Error ? error.message : String(error) } });
+        }
+        continue;
+      }
+
       if (name !== 'addDiscordReaction' || !input.addReaction) {
         functionResponses.push({ id, name, response: { ok: false, error: 'unknown_tool' } });
         continue;
@@ -271,6 +324,51 @@ export class DiscordTextResponder {
   }
 }
 
+function discordToolDeclarations(input: DiscordReplyInput) {
+  const declarations: Record<string, unknown>[] = [];
+  if (input.addReaction) {
+    declarations.push({
+      name: 'addDiscordReaction',
+      description: 'Add one emoji reaction to a Discord message from the current context.',
+      parameters: {
+        type: Type.OBJECT,
+        properties: {
+          messageId: {
+            type: Type.STRING,
+            description: 'The target Discord message ID. Must be one of the message IDs shown in the current context.'
+          },
+          emoji: {
+            type: Type.STRING,
+            description: 'A Unicode emoji or custom emoji mention to react with, for example 👍 or <:name:id>.'
+          }
+        },
+        required: ['messageId', 'emoji']
+      }
+    });
+  }
+  if (input.sendGif) {
+    declarations.push({
+      name: 'sendDiscordGif',
+      description: 'Send a GIF or image URL to the Discord channel, optionally with a short caption.',
+      parameters: {
+        type: Type.OBJECT,
+        properties: {
+          url: {
+            type: Type.STRING,
+            description: 'A direct http(s) URL to a GIF or image that Discord can embed.'
+          },
+          caption: {
+            type: Type.STRING,
+            description: 'Optional short caption to send above the GIF.'
+          }
+        },
+        required: ['url']
+      }
+    });
+  }
+  return declarations;
+}
+
 function formatContextMessage(message: DiscordContextMessage) {
   const timestamp = message.timestamp ? `${message.timestamp} ` : '';
   const messageId = ` [messageId: ${message.messageId}]`;
@@ -291,7 +389,7 @@ function formatKnownUser(user: DiscordKnownUser) {
 
 function formatAttachmentSummary(attachment: DiscordAttachmentSummary) {
   const status = attachment.imageIncluded
-    ? 'image included for inspection'
+    ? 'visual media included for inspection'
     : attachment.skippedReason
       ? attachment.skippedReason
       : 'metadata only';
@@ -313,6 +411,27 @@ function parseReactionArgs(args: unknown) {
     return null;
   }
   return { messageId, emoji };
+}
+
+function parseGifArgs(args: unknown) {
+  const candidate = args as { url?: unknown; caption?: unknown };
+  if (typeof candidate.url !== 'string') {
+    return null;
+  }
+  const url = candidate.url.trim();
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  if (!['http:', 'https:'].includes(parsed.protocol)) {
+    return null;
+  }
+  const caption = typeof candidate.caption === 'string'
+    ? candidate.caption.replace(/\s+/g, ' ').trim().slice(0, 300)
+    : undefined;
+  return { url, caption: caption || undefined };
 }
 
 function extractLiveText(message: LiveServerMessage) {

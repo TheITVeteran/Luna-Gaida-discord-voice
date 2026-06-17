@@ -17,6 +17,8 @@ import type { PersonalityService } from '../personality/service.js';
 import { createToolRegistry, type RegisteredTool } from '../tools/registry.js';
 import { logger } from '../logging/logger.js';
 
+export type LiveSurface = 'desktop' | 'discord' | 'browser';
+
 export type LiveClientEvent =
   | { type: 'status'; status: 'offline' | 'connecting' | 'connected' | 'error'; reason?: string }
   | { type: 'audio'; data: string; mimeType: 'audio/pcm;rate=24000' }
@@ -26,7 +28,7 @@ export type LiveClientEvent =
   | { type: 'avatar.model.change'; payload: { modelName: string } };
 
 export interface LiveInputEvent {
-  type: 'text' | 'audio' | 'video' | 'mode' | 'interrupt';
+  type: 'text' | 'audio' | 'video' | 'mode' | 'interrupt' | 'turnComplete';
   data?: string | undefined;
   mimeType?: string | undefined;
   text?: string | undefined;
@@ -40,6 +42,8 @@ export class LiveSessionManager {
   private connecting: Promise<void> | null = null;
   private emit: ((event: LiveClientEvent) => void) | null = null;
   private passive = false;
+  private desiredSurface: LiveSurface | null = null;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     private readonly config: AppConfig,
@@ -56,7 +60,12 @@ export class LiveSessionManager {
     this.emit = emit;
   }
 
-  async connect(surface: 'desktop' | 'discord' = 'desktop') {
+  async connect(surface: LiveSurface = 'desktop') {
+    this.desiredSurface = surface;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     if (!this.ai) {
       this.emit?.({ type: 'status', status: 'error', reason: 'GEMINI_API_KEY is not configured' });
       return;
@@ -75,7 +84,7 @@ export class LiveSessionManager {
     return this.connecting;
   }
 
-  async handleInput(input: LiveInputEvent, surface: 'desktop' | 'discord' = 'desktop') {
+  async handleInput(input: LiveInputEvent, surface: LiveSurface = 'desktop') {
     if (input.type === 'mode') {
       this.passive = Boolean(input.passive);
       return;
@@ -89,7 +98,9 @@ export class LiveSessionManager {
       return;
     }
 
-    if (input.type === 'text' && input.text?.trim()) {
+    if (input.type === 'turnComplete') {
+      this.session.sendClientContent({ turnComplete: true });
+    } else if (input.type === 'text' && input.text?.trim()) {
       this.session.sendRealtimeInput({ text: this.decorateUserText(input.text.trim()) });
     } else if (input.type === 'audio' && input.data) {
       this.session.sendRealtimeInput({ audio: { data: input.data, mimeType: input.mimeType ?? 'audio/pcm;rate=16000' } });
@@ -99,12 +110,17 @@ export class LiveSessionManager {
   }
 
   close() {
+    this.desiredSurface = null;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     this.session?.close();
     this.session = null;
     this.emit?.({ type: 'status', status: 'offline' });
   }
 
-  private async open(surface: 'desktop' | 'discord') {
+  private async open(surface: LiveSurface) {
     const memoryContext = this.memory
       .listForContext(surface)
       .map((record) => `- [${record.privacy}/${record.source}] ${record.summary ?? record.content}`)
@@ -129,15 +145,32 @@ export class LiveSessionManager {
         },
         onerror: (error) => {
           logger.error('Gemini Live session error', error);
+          this.session = null;
           this.emit?.({ type: 'status', status: 'error', reason: error.message });
+          this.scheduleReconnect(surface);
         },
         onclose: (event) => {
           logger.warn('Gemini Live session closed', event.reason);
           this.session = null;
           this.emit?.({ type: 'status', status: 'offline', reason: event.reason });
+          this.scheduleReconnect(surface);
         }
       }
     });
+  }
+
+  private scheduleReconnect(surface: LiveSurface) {
+    if (this.desiredSurface !== surface || this.reconnectTimer || !this.ai) {
+      return;
+    }
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (this.desiredSurface === surface && !this.session) {
+        void this.connect(surface).catch((error) => {
+          logger.warn('Gemini Live reconnect failed', error instanceof Error ? error.message : String(error));
+        });
+      }
+    }, 1_500);
   }
 
   private decorateUserText(text: string) {
@@ -179,7 +212,7 @@ export class LiveSessionManager {
     } as LiveConnectConfig;
   }
 
-  private async handleMessage(message: LiveServerMessage, surface: 'desktop' | 'discord') {
+  private async handleMessage(message: LiveServerMessage, surface: LiveSurface) {
     if (message.serverContent?.interrupted) {
       this.emit?.({ type: 'avatar.state', payload: { state: 'listening' } });
       return;

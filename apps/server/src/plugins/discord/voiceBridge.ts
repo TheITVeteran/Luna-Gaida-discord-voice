@@ -24,6 +24,36 @@ const GEMINI_INPUT_RATE = 16000;
 const GEMINI_OUTPUT_RATE = 24000;
 const SPEECH_END_SILENCE_MS = 900;
 
+interface VoiceBridgeDiagnostics {
+  attached: boolean;
+  channelId: string | null;
+  connectionStatus: string | null;
+  receiverAttached: boolean;
+  playerStatus: string;
+  activeInputUsers: number;
+  speakingStarts: number;
+  rawUdpPackets: number;
+  mappedUdpPackets: number;
+  unmappedUdpPackets: number;
+  opusBytes: number;
+  decodedPcmBytes: number;
+  geminiInputBytes: number;
+  geminiTurnCompletes: number;
+  geminiAudioEvents: number;
+  geminiOutputBytes: number;
+  discordOutputBytes: number;
+  lastSpeakingAt: string | null;
+  lastRawUdpAt: string | null;
+  lastUdpSsrc: number | null;
+  lastOpusAt: string | null;
+  lastDecodedAt: string | null;
+  lastGeminiInputAt: string | null;
+  lastGeminiTurnCompleteAt: string | null;
+  lastGeminiAudioAt: string | null;
+  lastDiscordWriteAt: string | null;
+  lastError: string | null;
+}
+
 export class DiscordVoiceBridge {
   private readonly live: LiveSessionManager;
   private readonly player: AudioPlayer;
@@ -32,9 +62,40 @@ export class DiscordVoiceBridge {
   private channelId: string | null = null;
   private speakingHandler: ((userId: string) => void) | null = null;
   private connectionStateHandler: ((oldState: VoiceConnectionState, newState: VoiceConnectionState) => void) | null = null;
+  private udpDiagnosticsSocket: { on(event: 'message', listener: (message: Buffer) => void): unknown; off(event: 'message', listener: (message: Buffer) => void): unknown } | null = null;
+  private udpDiagnosticsHandler: ((message: Buffer) => void) | null = null;
   private readonly activeInputUsers = new Set<string>();
   private inputQueue: Promise<void> = Promise.resolve();
   private destroyed = false;
+  private diagnostics: VoiceBridgeDiagnostics = {
+    attached: false,
+    channelId: null,
+    connectionStatus: null,
+    receiverAttached: false,
+    playerStatus: AudioPlayerStatus.Idle,
+    activeInputUsers: 0,
+    speakingStarts: 0,
+    rawUdpPackets: 0,
+    mappedUdpPackets: 0,
+    unmappedUdpPackets: 0,
+    opusBytes: 0,
+    decodedPcmBytes: 0,
+    geminiInputBytes: 0,
+    geminiTurnCompletes: 0,
+    geminiAudioEvents: 0,
+    geminiOutputBytes: 0,
+    discordOutputBytes: 0,
+    lastSpeakingAt: null,
+    lastRawUdpAt: null,
+    lastUdpSsrc: null,
+    lastOpusAt: null,
+    lastDecodedAt: null,
+    lastGeminiInputAt: null,
+    lastGeminiTurnCompleteAt: null,
+    lastGeminiAudioAt: null,
+    lastDiscordWriteAt: null,
+    lastError: null
+  };
 
   constructor(
     private readonly guildId: string,
@@ -53,10 +114,14 @@ export class DiscordVoiceBridge {
       }
     });
     this.player.on('error', (error) => {
+      this.recordError(error.message);
       logger.error('Discord voice audio player failed', {
         guildId: this.guildId,
         error: error.message
       });
+    });
+    this.player.on('stateChange', (_oldState, newState) => {
+      this.diagnostics.playerStatus = newState.status;
     });
     this.player.on(AudioPlayerStatus.Idle, () => {
       if (!this.destroyed && !this.output.destroyed) {
@@ -84,37 +149,58 @@ export class DiscordVoiceBridge {
       this.attachConnectionStateHandler(connection);
     }
     this.channelId = channelId;
+    this.diagnostics.attached = true;
+    this.diagnostics.channelId = channelId;
+    this.diagnostics.connectionStatus = connection.state.status;
     connection.subscribe(this.player);
+    this.attachUdpDiagnostics(connection);
 
     if (connection.state.status === VoiceConnectionStatus.Ready) {
       this.attachReceiver(connection);
     }
   }
 
+  getStatus() {
+    return {
+      guildId: this.guildId,
+      ...this.diagnostics,
+      connectionStatus: this.connection?.state.status ?? this.diagnostics.connectionStatus,
+      activeInputUsers: this.activeInputUsers.size
+    };
+  }
+
   destroy() {
     this.destroyed = true;
     this.detachReceiver();
+    this.detachUdpDiagnostics();
     this.detachConnectionStateHandler();
     this.player.stop(true);
     this.output.destroy();
     this.live.close();
     this.connection = null;
     this.channelId = null;
+    this.diagnostics.attached = false;
+    this.diagnostics.channelId = null;
+    this.diagnostics.connectionStatus = VoiceConnectionStatus.Destroyed;
+    this.diagnostics.receiverAttached = false;
   }
 
   private attachConnectionStateHandler(connection: VoiceConnection) {
     this.connectionStateHandler = (_oldState, newState) => {
+      this.diagnostics.connectionStatus = newState.status;
       if (this.destroyed || this.connection !== connection) {
         return;
       }
 
       if (newState.status === VoiceConnectionStatus.Ready) {
+        this.attachUdpDiagnostics(connection);
         this.attachReceiver(connection);
         return;
       }
 
       if (newState.status === VoiceConnectionStatus.Destroyed) {
         this.detachReceiver();
+        this.detachUdpDiagnostics();
         this.live.close();
         this.connection = null;
         this.channelId = null;
@@ -138,9 +224,12 @@ export class DiscordVoiceBridge {
       if (userId === this.botUserId || this.activeInputUsers.has(userId)) {
         return;
       }
+      this.diagnostics.speakingStarts += 1;
+      this.diagnostics.lastSpeakingAt = new Date().toISOString();
       this.receiveUserSpeech(connection, userId);
     };
     connection.receiver.speaking.on('start', this.speakingHandler);
+    this.diagnostics.receiverAttached = true;
   }
 
   private detachReceiver() {
@@ -149,10 +238,58 @@ export class DiscordVoiceBridge {
     }
     this.speakingHandler = null;
     this.activeInputUsers.clear();
+    this.diagnostics.receiverAttached = false;
+    this.diagnostics.activeInputUsers = 0;
+  }
+
+  private attachUdpDiagnostics(connection: VoiceConnection) {
+    const networking = 'networking' in connection.state ? connection.state.networking : null;
+    const udp = networking && 'state' in networking && 'udp' in networking.state ? networking.state.udp : null;
+    if (!udp || udp === this.udpDiagnosticsSocket) {
+      return;
+    }
+    this.detachUdpDiagnostics();
+    this.udpDiagnosticsSocket = udp;
+    this.udpDiagnosticsHandler = (message: Buffer) => {
+      if (message.length <= 8) {
+        return;
+      }
+      const ssrc = message.readUInt32BE(8);
+      this.diagnostics.rawUdpPackets += 1;
+      this.diagnostics.lastRawUdpAt = new Date().toISOString();
+      this.diagnostics.lastUdpSsrc = ssrc;
+      const mappedUser = connection.receiver.ssrcMap.get(ssrc);
+      if (mappedUser) {
+        this.diagnostics.mappedUdpPackets += 1;
+      } else {
+        this.diagnostics.unmappedUdpPackets += 1;
+      }
+      if (this.diagnostics.rawUdpPackets <= 3 || this.diagnostics.rawUdpPackets % 100 === 0) {
+        logger.debug('Discord voice received raw UDP audio packet', {
+          guildId: this.guildId,
+          channelId: this.channelId,
+          ssrc,
+          mappedUserId: mappedUser?.userId ?? null,
+          rawUdpPackets: this.diagnostics.rawUdpPackets,
+          mappedUdpPackets: this.diagnostics.mappedUdpPackets,
+          unmappedUdpPackets: this.diagnostics.unmappedUdpPackets
+        });
+      }
+    };
+    udp.on('message', this.udpDiagnosticsHandler);
+  }
+
+  private detachUdpDiagnostics() {
+    if (this.udpDiagnosticsSocket && this.udpDiagnosticsHandler) {
+      this.udpDiagnosticsSocket.off('message', this.udpDiagnosticsHandler);
+    }
+    this.udpDiagnosticsSocket = null;
+    this.udpDiagnosticsHandler = null;
   }
 
   private receiveUserSpeech(connection: VoiceConnection, userId: string) {
     this.activeInputUsers.add(userId);
+    this.diagnostics.activeInputUsers = this.activeInputUsers.size;
     this.queueGeminiText([
       'Discord voice metadata:',
       `Speaker display name: ${this.resolveSpeakerName(userId)}`,
@@ -171,29 +308,72 @@ export class DiscordVoiceBridge {
       channels: DISCORD_CHANNELS,
       rate: DISCORD_RATE
     });
+    let forwardedAudio = false;
+    let loggedDecodedAudio = false;
+    let cleanedUp = false;
+    const cleanup = (completeTurn: boolean) => {
+      if (cleanedUp) {
+        return;
+      }
+      cleanedUp = true;
+      this.activeInputUsers.delete(userId);
+      this.diagnostics.activeInputUsers = this.activeInputUsers.size;
+      if (completeTurn && forwardedAudio) {
+        this.queueGeminiTurnComplete();
+      }
+    };
+
+    opusStream.on('data', (chunk: Buffer) => {
+      this.diagnostics.opusBytes += chunk.length;
+      this.diagnostics.lastOpusAt = new Date().toISOString();
+    });
+    opusStream.once('error', (error) => {
+      cleanup(false);
+      this.recordError(error instanceof Error ? error.message : String(error));
+      logger.warn('Discord voice Opus receive stream failed', {
+        guildId: this.guildId,
+        channelId: this.channelId,
+        userId,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    });
+    decoder.once('end', () => {
+      cleanup(true);
+    });
+    decoder.once('close', () => {
+      cleanup(true);
+    });
+    decoder.once('error', (error) => {
+      cleanup(false);
+      this.recordError(error instanceof Error ? error.message : String(error));
+      logger.warn('Discord voice PCM decoder failed', {
+        guildId: this.guildId,
+        channelId: this.channelId,
+        userId,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    });
 
     opusStream
       .pipe(decoder)
       .on('data', (chunk: Buffer) => {
+        this.diagnostics.decodedPcmBytes += chunk.length;
+        this.diagnostics.lastDecodedAt = new Date().toISOString();
+        if (!loggedDecodedAudio) {
+          loggedDecodedAudio = true;
+          logger.debug('Discord voice received decoded audio', {
+            guildId: this.guildId,
+            channelId: this.channelId,
+            userId,
+            pcmBytes: chunk.length,
+            totalDecodedPcmBytes: this.diagnostics.decodedPcmBytes
+          });
+        }
         const pcm16k = downsampleDiscordPcmForGemini(chunk);
         if (pcm16k.length > 0) {
+          forwardedAudio = true;
           this.queueGeminiInput(pcm16k);
         }
-      })
-      .once('end', () => {
-        this.activeInputUsers.delete(userId);
-      })
-      .once('close', () => {
-        this.activeInputUsers.delete(userId);
-      })
-      .once('error', (error) => {
-        this.activeInputUsers.delete(userId);
-        logger.warn('Discord voice receive stream failed', {
-          guildId: this.guildId,
-          channelId: this.channelId,
-          userId,
-          error: error instanceof Error ? error.message : String(error)
-        });
       });
   }
 
@@ -213,6 +393,14 @@ export class DiscordVoiceBridge {
   }
 
   private queueGeminiInput(pcm: Buffer) {
+    this.diagnostics.geminiInputBytes += pcm.length;
+    this.diagnostics.lastGeminiInputAt = new Date().toISOString();
+    logger.debug('Discord voice forwarding audio to Gemini Live', {
+      guildId: this.guildId,
+      channelId: this.channelId,
+      pcmBytes: pcm.length,
+      totalGeminiInputBytes: this.diagnostics.geminiInputBytes
+    });
     const data = pcm.toString('base64');
     this.inputQueue = this.inputQueue
       .then(() => this.live.handleInput({
@@ -229,15 +417,55 @@ export class DiscordVoiceBridge {
       });
   }
 
+  private queueGeminiTurnComplete() {
+    this.diagnostics.geminiTurnCompletes += 1;
+    this.diagnostics.lastGeminiTurnCompleteAt = new Date().toISOString();
+    this.inputQueue = this.inputQueue
+      .then(() => this.live.handleInput({
+        type: 'turnComplete'
+      }, 'discord'))
+      .catch((error) => {
+        this.recordError(error instanceof Error ? error.message : String(error));
+        logger.warn('Failed to complete Discord voice turn in Gemini Live', {
+          guildId: this.guildId,
+          channelId: this.channelId,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      });
+  }
+
   private handleLiveEvent(event: LiveClientEvent) {
     if (event.type !== 'audio') {
       return;
     }
     const pcm24k = Buffer.from(event.data, 'base64');
+    this.diagnostics.geminiAudioEvents += 1;
+    this.diagnostics.geminiOutputBytes += pcm24k.length;
+    this.diagnostics.lastGeminiAudioAt = new Date().toISOString();
+    logger.debug('Discord voice received Gemini audio', {
+      guildId: this.guildId,
+      channelId: this.channelId,
+      pcmBytes: pcm24k.length,
+      audioEvents: this.diagnostics.geminiAudioEvents,
+      totalGeminiOutputBytes: this.diagnostics.geminiOutputBytes
+    });
     const discordPcm = upsampleGeminiPcmForDiscord(pcm24k);
     if (discordPcm.length > 0 && !this.output.destroyed) {
+      logger.debug('Discord voice writing audio to Discord output', {
+        guildId: this.guildId,
+        channelId: this.channelId,
+        pcmBytes: discordPcm.length,
+        playerStatus: this.diagnostics.playerStatus,
+        connectionStatus: this.connection?.state.status ?? this.diagnostics.connectionStatus
+      });
       this.output.write(discordPcm);
+      this.diagnostics.discordOutputBytes += discordPcm.length;
+      this.diagnostics.lastDiscordWriteAt = new Date().toISOString();
     }
+  }
+
+  private recordError(error: string) {
+    this.diagnostics.lastError = error;
   }
 }
 

@@ -3,7 +3,7 @@ import type { MemoryRepository } from '../memory/repository.js';
 import { classifyText } from '../policy/privacy.js';
 
 export interface ToolContext {
-  surface: 'desktop' | 'discord';
+  surface: 'desktop' | 'discord' | 'browser';
   memory: MemoryRepository;
   emitClientEvent?: (event: unknown) => void;
 }
@@ -60,7 +60,7 @@ export function createToolRegistry(): RegisteredTool[] {
         const writeInput = {
           content: parsed.content,
           privacy,
-          source: context.surface
+          source: context.surface === 'browser' ? 'desktop' : context.surface
         };
         const record = context.memory.write(parsed.tags ? { ...writeInput, tags: parsed.tags } : writeInput);
         return { id: record.id, privacy: record.privacy };

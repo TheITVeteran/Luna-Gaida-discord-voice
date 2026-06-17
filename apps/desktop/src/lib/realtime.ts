@@ -37,7 +37,7 @@ export class RealtimeClient extends EventTarget {
       return;
     }
     this.socket = new WebSocket('ws://127.0.0.1:8787/realtime');
-    this.socket.addEventListener('open', () => this.send({ type: 'connect' }));
+    this.socket.addEventListener('open', () => this.send({ type: 'connect', surface: 'app' }));
     this.socket.addEventListener('message', (message) => {
       const event = JSON.parse(message.data as string) as RealtimeEvent;
       if (event.type === 'audio' && this.audioEnabled) {
