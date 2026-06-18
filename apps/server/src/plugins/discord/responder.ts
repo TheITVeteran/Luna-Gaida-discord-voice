@@ -68,6 +68,8 @@ interface DiscordReplyInput {
   reactionTargetMessageIds?: string[];
   addReaction?: (messageId: string, emoji: string) => Promise<Record<string, unknown>>;
   sendGif?: (url: string, caption?: string) => Promise<Record<string, unknown>>;
+  joinRequesterVoiceChannel?: () => Promise<Record<string, unknown>>;
+  leaveVoiceChannel?: () => Promise<Record<string, unknown>>;
 }
 
 export class DiscordTextResponder {
@@ -115,6 +117,12 @@ export class DiscordTextResponder {
         : null,
       input.sendGif
         ? 'You have a tool named sendDiscordGif. Use it when the user asks for a GIF or when a GIF is clearly a better Discord response. Provide a short search query, not a URL; the backend will search the configured GIF API. Do not use Google Search for GIFs. If the GIF is enough, use the tool and then reply with exactly [[GIADA_NO_REPLY]].'
+        : null,
+      input.joinRequesterVoiceChannel
+        ? 'You have a tool named joinRequesterVoiceChannel. Use it when the current message asks you to join voice, connect to voice, come into voice chat, or join the author. This only joins the current message author\'s voice channel and only when voice watch is disabled in this server.'
+        : null,
+      input.leaveVoiceChannel
+        ? 'You have a tool named leaveVoiceChannel. Use it when the current message asks you to leave, disconnect from, or stop being in voice. This only disconnects from voice when voice watch is disabled in this server.'
         : null,
       'You can ping a Discord user only when the user explicitly asks you to notify, tag, mention, or ping them.',
       'To ping a known user, write their mention exactly as <@USER_ID> using the user ID from Current known Discord users. Do not invent user IDs.',
@@ -222,7 +230,8 @@ export class DiscordTextResponder {
           const response = await sharedTool.run(call.args, {
             surface: 'discord',
             memory: this.memory,
-            ...(music ? { music } : {})
+            ...(music ? { music } : {}),
+            ...(input.leaveVoiceChannel ? { voice: { leaveVoiceChannel: input.leaveVoiceChannel } } : {})
           });
           logger.info('Discord text responder shared tool completed', {
             guildId: input.guildId,
@@ -259,6 +268,34 @@ export class DiscordTextResponder {
           functionResponses.push({ id, name, response: { ...response, provider: gif.provider, query: args.query } });
         } catch (error) {
           functionResponses.push({ id, name, response: { ok: false, error: error instanceof Error ? error.message : String(error) } });
+        }
+        continue;
+      }
+
+      if (name === 'joinRequesterVoiceChannel' && input.joinRequesterVoiceChannel) {
+        try {
+          const response = await input.joinRequesterVoiceChannel();
+          functionResponses.push({ id, name, response });
+        } catch (error) {
+          functionResponses.push({
+            id,
+            name,
+            response: { ok: false, error: error instanceof Error ? error.message : String(error) }
+          });
+        }
+        continue;
+      }
+
+      if (name === 'leaveVoiceChannel' && input.leaveVoiceChannel) {
+        try {
+          const response = await input.leaveVoiceChannel();
+          functionResponses.push({ id, name, response });
+        } catch (error) {
+          functionResponses.push({
+            id,
+            name,
+            response: { ok: false, error: error instanceof Error ? error.message : String(error) }
+          });
         }
         continue;
       }
@@ -300,19 +337,26 @@ export class DiscordTextResponder {
 
   private getTextContext(input: DiscordReplyInput, systemInstruction: string) {
     const key = discordTextContextKey(input.guildId, input.channelId);
+    const functionDeclarations = [
+      ...this.tools.map((tool) => structuredClone(tool.declaration) as Record<string, unknown>),
+      ...discordToolDeclarations(input)
+    ];
+    const configSignature = textContextConfigSignature(systemInstruction, functionDeclarations);
     let context = this.textContexts.get(key);
+    if (context && !context.hasConfigSignature(configSignature)) {
+      context.dispose();
+      context = undefined;
+    }
     if (!context) {
       context = new DiscordLiveTextContext(
         key,
         this.ai!,
         this.config.GEMINI_MODEL,
         systemInstruction,
+        configSignature,
         () => [
           {
-            functionDeclarations: [
-              ...this.tools.map((tool) => structuredClone(tool.declaration) as Record<string, unknown>),
-              ...discordToolDeclarations(input)
-            ]
+            functionDeclarations: functionDeclarations.map((declaration) => structuredClone(declaration))
           }
         ],
         () => {
@@ -364,9 +408,14 @@ class DiscordLiveTextContext {
     private readonly ai: GoogleGenAI,
     private readonly model: string,
     private readonly systemInstruction: string,
+    private readonly configSignature: string,
     private readonly toolsProvider: () => Array<Record<string, unknown>>,
     private readonly onDispose: () => void
   ) {}
+
+  hasConfigSignature(configSignature: string) {
+    return this.configSignature === configSignature;
+  }
 
   generate(
     parts: Part[],
@@ -546,7 +595,7 @@ class DiscordLiveTextContext {
     current.reject(error);
   }
 
-  private dispose() {
+  dispose() {
     const session = this.session;
     this.session = null;
     this.connecting = null;
@@ -573,6 +622,13 @@ function withEmptyRetryInstruction(parts: Part[]) {
       text: 'Retry instruction: your previous Live turn completed with no audio and no output transcription. This retry must not be empty. Produce a normal concise Discord reply, or output exactly [[GIADA_NO_REPLY]] if nothing should be sent.'
     }
   ];
+}
+
+function textContextConfigSignature(systemInstruction: string, functionDeclarations: Array<Record<string, unknown>>) {
+  return JSON.stringify({
+    systemInstruction,
+    toolNames: functionDeclarations.map((declaration) => declaration.name)
+  });
 }
 
 function discordToolDeclarations(input: DiscordReplyInput) {
@@ -614,6 +670,16 @@ function discordToolDeclarations(input: DiscordReplyInput) {
           }
         },
         required: ['query']
+      }
+    });
+  }
+  if (input.joinRequesterVoiceChannel) {
+    declarations.push({
+      name: 'joinRequesterVoiceChannel',
+      description: 'Join the voice channel that the current Discord text message author is currently in. Use only when the author asks you to join voice. This is refused if voice watch is enabled in the current server.',
+      parameters: {
+        type: Type.OBJECT,
+        properties: {}
       }
     });
   }

@@ -14,7 +14,7 @@ import {
 import type { AppConfig } from '../config/env.js';
 import type { MemoryRepository } from '../memory/repository.js';
 import type { PersonalityService } from '../personality/service.js';
-import { createToolRegistry, isToolAvailableForSurface, type MusicController, type RegisteredTool, type ToolContext } from '../tools/registry.js';
+import { createToolRegistry, isToolAvailableForSurface, type MusicController, type RegisteredTool, type ToolContext, type VoiceController } from '../tools/registry.js';
 import { logger } from '../logging/logger.js';
 
 export type LiveSurface = 'desktop' | 'discord' | 'browser';
@@ -53,7 +53,7 @@ export class LiveSessionManager {
     private readonly config: AppConfig,
     private readonly memory: MemoryRepository,
     private readonly personality: PersonalityService,
-    private readonly toolContextProviders: { music?: MusicController; memoryTags?: string[] } = {}
+    private readonly toolContextProviders: { music?: MusicController; voice?: VoiceController; memoryTags?: string[] } = {}
   ) {
     this.ai = config.GEMINI_API_KEY
       ? new GoogleGenAI({ apiKey: config.GEMINI_API_KEY, httpOptions: { apiVersion: config.GEMINI_API_VERSION } })
@@ -168,6 +168,7 @@ export class LiveSessionManager {
           `You are speaking in a Discord voice channel. Always reply in ${this.config.GIADA_DEFAULT_LANGUAGE} unless the user explicitly asks for or speaks another language.`,
           `If the audio transcription looks like the wrong language, assume the user is still speaking ${this.config.GIADA_DEFAULT_LANGUAGE} and answer in ${this.config.GIADA_DEFAULT_LANGUAGE}.`,
           'When users ask you to play, search for, pause, resume, stop, seek, or change music volume in voice, use the Discord music tools instead of describing how to do it.',
+          'When users ask you to leave or disconnect from voice, use the leaveVoiceChannel tool.',
           'Be concise and respond after each completed user voice turn.'
         ].join(' ')
         : null
@@ -353,10 +354,14 @@ export class LiveSessionManager {
           if (this.toolContextProviders.music) {
             toolContext.music = this.toolContextProviders.music;
           }
+          if (this.toolContextProviders.voice) {
+            toolContext.voice = this.toolContextProviders.voice;
+          }
           logger.info('Gemini Live requested tool', {
             surface,
             name,
-            musicControllerAvailable: Boolean(toolContext.music)
+            musicControllerAvailable: Boolean(toolContext.music),
+            voiceControllerAvailable: Boolean(toolContext.voice)
           });
           const response = await tool.run(call.args, toolContext);
           logger.info('Gemini Live tool completed', {

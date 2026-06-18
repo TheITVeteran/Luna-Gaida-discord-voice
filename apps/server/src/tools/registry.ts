@@ -7,6 +7,7 @@ export interface ToolContext {
   memory: MemoryRepository;
   emitClientEvent?: (event: unknown) => void;
   music?: MusicController;
+  voice?: VoiceController;
 }
 
 export interface RegisteredTool {
@@ -19,9 +20,16 @@ export interface MusicController {
   pauseMusic(): Promise<Record<string, unknown>>;
   resumeMusic(): Promise<Record<string, unknown>>;
   stopMusic(): Promise<Record<string, unknown>>;
+  nextMusic(): Promise<Record<string, unknown>>;
+  previousMusic(): Promise<Record<string, unknown>>;
   seekMusic(positionSeconds: number): Promise<Record<string, unknown>>;
   setMusicVolume(volume: number): Promise<Record<string, unknown>>;
+  setMusicLoop(enabled: boolean): Promise<Record<string, unknown>>;
   getMusicStatus(): Record<string, unknown>;
+}
+
+export interface VoiceController {
+  leaveVoiceChannel(): Promise<Record<string, unknown>>;
 }
 
 export interface ToolRegistryOptions {
@@ -70,6 +78,10 @@ const musicVolumeSchema = z.object({
 
 const musicSeekSchema = z.object({
   positionSeconds: z.number().min(0).max(24 * 60 * 60)
+});
+
+const musicLoopSchema = z.object({
+  enabled: z.boolean()
 });
 
 const searchWebSchema = z.object({
@@ -218,7 +230,7 @@ export function createToolRegistry(options: ToolRegistryOptions = {}): Registere
     {
       declaration: {
         name: 'playSong',
-        description: 'Search for a requested song or YouTube URL and play it in the current Discord voice channel. Use only when the user asks for music/audio playback.',
+        description: 'Search for a requested song or YouTube URL and play it in the current Discord voice channel. If music is already active, this adds the song to the queue. Use only when the user asks for music/audio playback.',
         parameters: {
           type: 'OBJECT',
           properties: {
@@ -290,6 +302,38 @@ export function createToolRegistry(options: ToolRegistryOptions = {}): Registere
     },
     {
       declaration: {
+        name: 'nextMusic',
+        description: 'Skip the current Discord voice music track and play the next queued song.',
+        parameters: {
+          type: 'OBJECT',
+          properties: {}
+        }
+      },
+      async run(_args, context) {
+        if (context.surface !== 'discord' || !context.music) {
+          return { ok: false, error: 'music_playback_requires_discord_voice' };
+        }
+        return context.music.nextMusic();
+      }
+    },
+    {
+      declaration: {
+        name: 'previousMusic',
+        description: 'Go back to the previously played Discord voice music track.',
+        parameters: {
+          type: 'OBJECT',
+          properties: {}
+        }
+      },
+      async run(_args, context) {
+        if (context.surface !== 'discord' || !context.music) {
+          return { ok: false, error: 'music_playback_requires_discord_voice' };
+        }
+        return context.music.previousMusic();
+      }
+    },
+    {
+      declaration: {
         name: 'seekMusic',
         description: 'Seek the current Discord voice music to a specific timestamp in seconds. For 1 minute 30 seconds, pass 90.',
         parameters: {
@@ -330,6 +374,26 @@ export function createToolRegistry(options: ToolRegistryOptions = {}): Registere
     },
     {
       declaration: {
+        name: 'setMusicLoop',
+        description: 'Enable or disable looping the current Discord voice music track.',
+        parameters: {
+          type: 'OBJECT',
+          properties: {
+            enabled: { type: 'BOOLEAN', description: 'True to repeat the current track when it ends, false to resume normal queue playback.' }
+          },
+          required: ['enabled']
+        }
+      },
+      async run(args, context) {
+        if (context.surface !== 'discord' || !context.music) {
+          return { ok: false, error: 'music_playback_requires_discord_voice' };
+        }
+        const parsed = musicLoopSchema.parse(args);
+        return context.music.setMusicLoop(parsed.enabled);
+      }
+    },
+    {
+      declaration: {
         name: 'getMusicStatus',
         description: 'Return the current Discord voice music playback status.',
         parameters: {
@@ -342,6 +406,22 @@ export function createToolRegistry(options: ToolRegistryOptions = {}): Registere
           return { ok: false, error: 'music_playback_requires_discord_voice' };
         }
         return context.music.getMusicStatus();
+      }
+    },
+    {
+      declaration: {
+        name: 'leaveVoiceChannel',
+        description: 'Leave the current Discord voice channel. Use when the user asks you to leave, disconnect, or stop being in voice.',
+        parameters: {
+          type: 'OBJECT',
+          properties: {}
+        }
+      },
+      async run(_args, context) {
+        if (context.surface !== 'discord' || !context.voice) {
+          return { ok: false, error: 'voice_control_requires_discord_voice' };
+        }
+        return context.voice.leaveVoiceChannel();
       }
     }
   ];

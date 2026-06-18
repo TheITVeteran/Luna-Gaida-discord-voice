@@ -17,7 +17,7 @@ import type { AppConfig } from '../../config/env.js';
 import { LiveSessionManager, type LiveClientEvent } from '../../live/liveSession.js';
 import type { MemoryRepository } from '../../memory/repository.js';
 import type { PersonalityService } from '../../personality/service.js';
-import type { MusicController } from '../../tools/registry.js';
+import type { MusicController, VoiceController } from '../../tools/registry.js';
 import { logger } from '../../logging/logger.js';
 
 const DISCORD_RATE = 48000;
@@ -41,11 +41,20 @@ interface DiscordMusicStatus {
   durationSeconds: number | null;
   volume: number;
   duckVolume: number;
+  loopCurrent: boolean;
   startedAt: string | null;
   positionSeconds: number;
   seekOffsetSeconds: number;
   lastError: string | null;
   queuedBytes: number;
+}
+
+interface DiscordMusicQueueEntry {
+  title: string;
+  url: string;
+  durationSeconds: number | null;
+  requestedQuery: string;
+  queuedAt: string;
 }
 
 interface VoiceBridgeDiagnostics {
@@ -85,7 +94,7 @@ interface VoiceBridgeDiagnostics {
   lastError: string | null;
 }
 
-export class DiscordVoiceBridge implements MusicController {
+export class DiscordVoiceBridge implements MusicController, VoiceController {
   private readonly live: LiveSessionManager;
   private readonly player: AudioPlayer;
   private readonly mixer: DiscordPcmMixer;
@@ -103,6 +112,8 @@ export class DiscordVoiceBridge implements MusicController {
   private musicFfmpeg: ReturnType<typeof spawn> | null = null;
   private musicStopRequested = false;
   private musicStatus: DiscordMusicStatus;
+  private readonly musicQueue: DiscordMusicQueueEntry[] = [];
+  private readonly musicHistory: YoutubeTrack[] = [];
   private destroyed = false;
   private diagnostics: VoiceBridgeDiagnostics = {
     attached: false,
@@ -146,6 +157,7 @@ export class DiscordVoiceBridge implements MusicController {
     private readonly voiceChannelId: string,
     private readonly botUserId: string,
     private readonly resolveSpeakerName: (userId: string) => string,
+    private readonly leaveVoice: () => Promise<Record<string, unknown>>,
     private readonly config: AppConfig,
     memory: MemoryRepository,
     personality: PersonalityService
@@ -157,6 +169,7 @@ export class DiscordVoiceBridge implements MusicController {
       durationSeconds: null,
       volume: config.DISCORD_MUSIC_VOLUME,
       duckVolume: config.DISCORD_MUSIC_DUCK_VOLUME,
+      loopCurrent: false,
       startedAt: null,
       positionSeconds: 0,
       seekOffsetSeconds: 0,
@@ -179,6 +192,7 @@ export class DiscordVoiceBridge implements MusicController {
     });
     this.live = new LiveSessionManager(config, memory, personality, {
       music: this,
+      voice: this,
       memoryTags: ['discord', guildId, voiceChannelId]
     });
     this.live.setEmitter((event) => this.handleLiveEvent(event));
@@ -649,26 +663,38 @@ export class DiscordVoiceBridge implements MusicController {
 
     const volume = options.volume ?? this.musicStatus.volume;
     this.mixer.setMusicVolume(volume);
-    this.musicStatus = {
-      ...this.musicStatus,
-      state: 'searching',
-      title: null,
-      url: null,
-      durationSeconds: null,
-      volume,
-      startedAt: null,
-      positionSeconds: 0,
-      seekOffsetSeconds: 0,
-      lastError: null,
-      queuedBytes: 0
-    };
+    const shouldQueue = this.isMusicActive();
+    if (!shouldQueue) {
+      this.musicStatus = {
+        ...this.musicStatus,
+        state: 'searching',
+        title: null,
+        url: null,
+        durationSeconds: null,
+        volume,
+        startedAt: null,
+        positionSeconds: 0,
+        seekOffsetSeconds: 0,
+        lastError: null,
+        queuedBytes: 0
+      };
+    } else {
+      this.musicStatus = {
+        ...this.musicStatus,
+        volume,
+        positionSeconds: this.currentMusicPositionSeconds(),
+        lastError: null
+      };
+    }
 
     let track: YoutubeTrack;
     try {
       track = await resolveYoutubeTrack(this.config, normalized);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.musicStatus = { ...this.musicStatus, state: 'error', lastError: message };
+      this.musicStatus = shouldQueue
+        ? { ...this.musicStatus, positionSeconds: this.currentMusicPositionSeconds(), lastError: message }
+        : { ...this.musicStatus, state: 'error', lastError: message };
       this.recordError(message);
       logger.warn('Discord music YouTube resolution failed', {
         guildId: this.guildId,
@@ -682,6 +708,26 @@ export class DiscordVoiceBridge implements MusicController {
       return { ok: false, error: message };
     }
 
+    if (shouldQueue) {
+      const entry = this.enqueueMusicTrack(track, normalized);
+      logger.info('Queued Discord music track', {
+        guildId: this.guildId,
+        channelId: this.channelId,
+        query: normalized,
+        title: track.title,
+        url: track.url,
+        queueLength: this.musicQueue.length
+      });
+      return {
+        ok: true,
+        queued: true,
+        title: entry.title,
+        url: entry.url,
+        durationSeconds: entry.durationSeconds,
+        queueLength: this.musicQueue.length
+      };
+    }
+
     logger.info('Discord music resolved track', {
       guildId: this.guildId,
       channelId: this.channelId,
@@ -690,22 +736,7 @@ export class DiscordVoiceBridge implements MusicController {
       url: track.url,
       durationSeconds: track.durationSeconds
     });
-    this.stopMusicProcesses('replaced');
-    this.mixer.clearMusic();
-    this.musicStopRequested = false;
-    this.musicStatus = {
-      ...this.musicStatus,
-      state: 'playing',
-      title: track.title,
-      url: track.url,
-      durationSeconds: track.durationSeconds,
-      startedAt: new Date().toISOString(),
-      positionSeconds: 0,
-      seekOffsetSeconds: 0,
-      lastError: null,
-      queuedBytes: 0
-    };
-    const started = this.startMusicDecoder(track, 0);
+    const started = this.playResolvedMusic(track, 0, { clearBufferedAudio: true, stopReason: 'replaced' });
     if (!started.ok) {
       return started;
     }
@@ -720,9 +751,10 @@ export class DiscordVoiceBridge implements MusicController {
   }
 
   async stopMusic() {
-    const wasActive = this.musicStatus.state === 'playing' || this.musicStatus.state === 'searching';
+    const wasActive = this.musicStatus.state === 'playing' || this.musicStatus.state === 'searching' || this.musicStatus.state === 'paused';
     this.stopMusicProcesses('requested');
     this.mixer.clearMusic();
+    this.musicQueue.length = 0;
     this.musicStatus = {
       ...this.musicStatus,
       state: 'idle',
@@ -777,6 +809,56 @@ export class DiscordVoiceBridge implements MusicController {
     return { ok: true, state: 'playing', positionSeconds };
   }
 
+  async nextMusic() {
+    const next = this.musicQueue.shift();
+    if (!next) {
+      return { ok: false, error: 'music_queue_empty', state: this.musicStatus.state };
+    }
+    const current = this.currentTrack();
+    if (current) {
+      this.musicHistory.push(current);
+    }
+    const started = this.playResolvedMusic(next, 0, { clearBufferedAudio: true, stopReason: 'next' });
+    if (!started.ok) {
+      return started;
+    }
+    return {
+      ok: true,
+      state: 'playing',
+      title: next.title,
+      url: next.url,
+      durationSeconds: next.durationSeconds,
+      queueLength: this.musicQueue.length
+    };
+  }
+
+  async previousMusic() {
+    const previous = this.musicHistory.pop();
+    if (!previous) {
+      return { ok: false, error: 'music_history_empty', state: this.musicStatus.state };
+    }
+    const current = this.currentTrack();
+    if (current) {
+      this.musicQueue.unshift({
+        ...current,
+        requestedQuery: current.title,
+        queuedAt: new Date().toISOString()
+      });
+    }
+    const started = this.playResolvedMusic(previous, 0, { clearBufferedAudio: true, stopReason: 'previous' });
+    if (!started.ok) {
+      return started;
+    }
+    return {
+      ok: true,
+      state: 'playing',
+      title: previous.title,
+      url: previous.url,
+      durationSeconds: previous.durationSeconds,
+      queueLength: this.musicQueue.length
+    };
+  }
+
   async seekMusic(positionSeconds: number) {
     const track = this.currentTrack();
     if (!track) {
@@ -811,12 +893,56 @@ export class DiscordVoiceBridge implements MusicController {
     return { ok: true, volume: normalized };
   }
 
+  async setMusicLoop(enabled: boolean) {
+    this.musicStatus = {
+      ...this.musicStatus,
+      loopCurrent: enabled,
+      positionSeconds: this.currentMusicPositionSeconds()
+    };
+    return { ok: true, loopCurrent: enabled };
+  }
+
+  async leaveVoiceChannel() {
+    return this.leaveVoice();
+  }
+
   getMusicStatus(): Record<string, unknown> {
     return {
       ...this.musicStatus,
       positionSeconds: this.currentMusicPositionSeconds(),
+      queuedBytes: this.mixer.getQueuedMusicBytes(),
+      queue: this.musicQueue.map((entry, index) => ({
+        index,
+        title: entry.title,
+        url: entry.url,
+        durationSeconds: entry.durationSeconds,
+        requestedQuery: entry.requestedQuery,
+        queuedAt: entry.queuedAt
+      })),
+      queueLength: this.musicQueue.length,
+      historyLength: this.musicHistory.length
+    };
+  }
+
+  private playResolvedMusic(track: YoutubeTrack, positionSeconds: number, options: { clearBufferedAudio: boolean; stopReason: string }): Record<string, unknown> {
+    this.stopMusicProcesses(options.stopReason);
+    if (options.clearBufferedAudio) {
+      this.mixer.clearMusic();
+    }
+    this.musicStopRequested = false;
+    this.musicStatus = {
+      ...this.musicStatus,
+      state: 'playing',
+      title: track.title,
+      url: track.url,
+      durationSeconds: track.durationSeconds,
+      startedAt: new Date().toISOString(),
+      positionSeconds,
+      seekOffsetSeconds: positionSeconds,
+      lastError: null,
       queuedBytes: this.mixer.getQueuedMusicBytes()
     };
+    return this.startMusicDecoder(track, positionSeconds);
   }
 
   private startMusicDecoder(track: YoutubeTrack, positionSeconds: number): Record<string, unknown> {
@@ -896,15 +1022,7 @@ export class DiscordVoiceBridge implements MusicController {
         failPlayback('ffmpeg', ffmpegStderr.trim() || `exited with code ${code}`);
         return;
       }
-      this.musicYtDlp = null;
-      this.musicFfmpeg = null;
-      this.musicStatus = {
-        ...this.musicStatus,
-        state: 'idle',
-        startedAt: null,
-        positionSeconds: this.currentMusicPositionSeconds(),
-        queuedBytes: this.mixer.getQueuedMusicBytes()
-      };
+      this.finishMusicTrack(track);
     });
     ffmpeg.stdin?.once('error', () => {
       // The decoder can close stdin while yt-dlp is still unwinding after stop/error.
@@ -935,6 +1053,62 @@ export class DiscordVoiceBridge implements MusicController {
       }
     });
     return { ok: true };
+  }
+
+  private finishMusicTrack(track: YoutubeTrack) {
+    this.musicYtDlp = null;
+    this.musicFfmpeg = null;
+    const positionSeconds = this.currentMusicPositionSeconds();
+
+    if (this.musicStatus.loopCurrent) {
+      const started = this.playResolvedMusic(track, 0, { clearBufferedAudio: false, stopReason: 'loop' });
+      if (!started.ok) {
+        this.musicStatus = {
+          ...this.musicStatus,
+          state: 'error',
+          startedAt: null,
+          positionSeconds,
+          queuedBytes: this.mixer.getQueuedMusicBytes(),
+          lastError: typeof started.error === 'string' ? started.error : 'failed_to_loop_music'
+        };
+      }
+      return;
+    }
+
+    const next = this.musicQueue.shift();
+    if (next) {
+      this.musicHistory.push(track);
+      const started = this.playResolvedMusic(next, 0, { clearBufferedAudio: false, stopReason: 'queue' });
+      if (!started.ok) {
+        this.musicStatus = {
+          ...this.musicStatus,
+          state: 'error',
+          startedAt: null,
+          positionSeconds,
+          queuedBytes: this.mixer.getQueuedMusicBytes(),
+          lastError: typeof started.error === 'string' ? started.error : 'failed_to_play_next_music'
+        };
+      }
+      return;
+    }
+
+    this.musicStatus = {
+      ...this.musicStatus,
+      state: 'idle',
+      startedAt: null,
+      positionSeconds,
+      queuedBytes: this.mixer.getQueuedMusicBytes()
+    };
+  }
+
+  private enqueueMusicTrack(track: YoutubeTrack, requestedQuery: string): DiscordMusicQueueEntry {
+    const entry = {
+      ...track,
+      requestedQuery,
+      queuedAt: new Date().toISOString()
+    };
+    this.musicQueue.push(entry);
+    return entry;
   }
 
   private stopMusicProcesses(reason: string) {
@@ -972,6 +1146,10 @@ export class DiscordVoiceBridge implements MusicController {
       url: this.musicStatus.url,
       durationSeconds: this.musicStatus.durationSeconds
     };
+  }
+
+  private isMusicActive() {
+    return this.musicStatus.state === 'searching' || this.musicStatus.state === 'playing' || this.musicStatus.state === 'paused';
   }
 
   private currentMusicPositionSeconds() {
