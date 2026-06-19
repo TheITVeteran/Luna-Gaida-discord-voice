@@ -1,0 +1,5 @@
+{
+  "enabled": true,
+  "name": "anime-girl",
+  "ffmpegFilter": "highpass=f=100,lowpass=f=13500,treble=g=2.5:f=4000,acompressor=threshold=-18dB:ratio=2.4:attack=5:release=65,asetrate=27000,aresample=24000,atempo=0.888889,volume=0.95"
+}

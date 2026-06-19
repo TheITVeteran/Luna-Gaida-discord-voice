@@ -11,7 +11,7 @@ import {
   type VoiceConnectionState
 } from '@discordjs/voice';
 import { spawn } from 'node:child_process';
-import { chmodSync, copyFileSync, mkdirSync, statSync } from 'node:fs';
+import { chmodSync, copyFileSync, mkdirSync, readFileSync, statSync, unwatchFile, watchFile } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
@@ -101,6 +101,7 @@ export class DiscordVoiceBridge implements MusicController, VoiceController {
   private readonly live: LiveSessionManager;
   private readonly player: AudioPlayer;
   private readonly mixer: DiscordPcmMixer;
+  private readonly voiceChanger: DiscordVoiceChanger;
   private connection: VoiceConnection | null = null;
   private channelId: string | null = null;
   private speakingHandler: ((userId: string) => void) | null = null;
@@ -193,6 +194,11 @@ export class DiscordVoiceBridge implements MusicController, VoiceController {
         }
       }
     });
+    this.voiceChanger = new DiscordVoiceChanger(
+      config.FFMPEG_BINARY,
+      config.DISCORD_VOICE_CHANGER_CONFIG,
+      (pcm24k) => this.enqueueAssistantSpeech(pcm24k)
+    );
     this.live = new LiveSessionManager(config, memory, personality, {
       music: this,
       voice: this,
@@ -252,6 +258,7 @@ export class DiscordVoiceBridge implements MusicController, VoiceController {
       ...this.diagnostics,
       connectionStatus: this.connection?.state.status ?? this.diagnostics.connectionStatus,
       activeInputUsers: this.activeInputUsers.size,
+      voiceChanger: this.voiceChanger.getStatus(),
       music: this.getMusicStatus()
     };
   }
@@ -264,6 +271,7 @@ export class DiscordVoiceBridge implements MusicController, VoiceController {
     this.clearVoiceTextDrainTimer();
     this.pendingVoiceTextMessages.length = 0;
     this.stopMusicProcesses('destroyed');
+    this.voiceChanger.destroy();
     this.mixer.destroy();
     this.player.stop(true);
     this.live.close();
@@ -592,6 +600,7 @@ export class DiscordVoiceBridge implements MusicController, VoiceController {
   private handleLiveEvent(event: LiveClientEvent) {
     if (event.type === 'avatar.state' && event.payload.state === 'listening') {
       this.mixer.clearAssistant();
+      this.voiceChanger.reset();
       return;
     }
 
@@ -610,6 +619,7 @@ export class DiscordVoiceBridge implements MusicController, VoiceController {
     }
     if (this.activeInputUsers.size > 0) {
       this.mixer.clearAssistant();
+      this.voiceChanger.reset();
       return;
     }
     const pcm24k = Buffer.from(event.data, 'base64');
@@ -623,6 +633,11 @@ export class DiscordVoiceBridge implements MusicController, VoiceController {
       audioEvents: this.diagnostics.geminiAudioEvents,
       totalGeminiOutputBytes: this.diagnostics.geminiOutputBytes
     });
+    this.voiceChanger.process(pcm24k);
+  }
+
+  private enqueueAssistantSpeech(pcm24k: Buffer) {
+    if (this.destroyed || this.activeInputUsers.size > 0) return;
     const discordPcm = upsampleGeminiPcmForDiscord(pcm24k);
     if (discordPcm.length > 0) {
       logger.debug('Discord voice writing audio to Discord output', {
@@ -1187,6 +1202,157 @@ interface YoutubeTrack {
 interface PcmQueueEntry {
   buffer: Buffer;
   offset: number;
+}
+
+interface VoiceChangerConfig {
+  enabled: boolean;
+  name: string;
+  ffmpegFilter: string;
+}
+
+class DiscordVoiceChanger {
+  private profile: VoiceChangerConfig;
+  private processor: ReturnType<typeof spawn> | null = null;
+  private available = true;
+  private destroyed = false;
+  private stderr = '';
+  private inputBytes = 0;
+  private outputBytes = 0;
+  private lastError: string | null = null;
+  private readonly configChangeHandler = () => this.reloadProfile();
+
+  constructor(
+    private readonly ffmpegBinary: string,
+    private readonly configPath: string,
+    private readonly onAudio: (pcm24k: Buffer) => void
+  ) {
+    this.profile = loadVoiceChangerConfig(configPath);
+    watchFile(this.configPath, { interval: 1_000 }, this.configChangeHandler);
+  }
+
+  process(pcm24k: Buffer) {
+    if (!pcm24k.length || this.destroyed) return;
+    this.inputBytes += pcm24k.length;
+    if (!this.profile.enabled || !this.available) {
+      this.onAudio(pcm24k);
+      return;
+    }
+    this.ensureProcessor();
+    const stdin = this.processor?.stdin;
+    if (!stdin?.writable) {
+      this.onAudio(pcm24k);
+      return;
+    }
+    stdin.write(pcm24k);
+  }
+
+  reset() {
+    this.stopProcessor();
+  }
+
+  destroy() {
+    this.destroyed = true;
+    unwatchFile(this.configPath, this.configChangeHandler);
+    this.stopProcessor();
+  }
+
+  getStatus() {
+    return {
+      configured: this.profile.enabled,
+      active: this.profile.enabled && this.available && Boolean(this.processor),
+      available: this.available,
+      name: this.profile.name,
+      inputBytes: this.inputBytes,
+      outputBytes: this.outputBytes,
+      lastError: this.lastError
+    };
+  }
+
+  private ensureProcessor() {
+    if (this.processor || this.destroyed) return;
+    this.stderr = '';
+    const processor = spawn(this.ffmpegBinary, [
+      '-hide_banner',
+      '-loglevel', 'warning',
+      '-f', 's16le',
+      '-ar', String(GEMINI_OUTPUT_RATE),
+      '-ac', '1',
+      '-i', 'pipe:0',
+      '-af', this.profile.ffmpegFilter,
+      '-f', 's16le',
+      '-ar', String(GEMINI_OUTPUT_RATE),
+      '-ac', '1',
+      'pipe:1'
+    ], { stdio: ['pipe', 'pipe', 'pipe'] });
+    this.processor = processor;
+    processor.stdout.on('data', (chunk: Buffer) => {
+      this.outputBytes += chunk.length;
+      this.onAudio(chunk);
+    });
+    processor.stderr.on('data', (chunk: Buffer) => {
+      this.stderr = (this.stderr + chunk.toString('utf8')).slice(-2_000);
+    });
+    processor.once('error', (error) => this.disableAfterFailure(processor, error.message));
+    processor.once('close', (code) => {
+      if (this.processor !== processor) return;
+      this.disableAfterFailure(processor, this.stderr.trim() || `ffmpeg exited with code ${code}`);
+    });
+  }
+
+  private reloadProfile() {
+    if (this.destroyed) return;
+    const next = loadVoiceChangerConfig(this.configPath);
+    if (
+      next.enabled === this.profile.enabled
+      && next.name === this.profile.name
+      && next.ffmpegFilter === this.profile.ffmpegFilter
+    ) return;
+    this.stopProcessor();
+    this.profile = next;
+    this.available = true;
+    this.lastError = null;
+  }
+
+  private disableAfterFailure(processor: ReturnType<typeof spawn>, error: string) {
+    if (this.processor !== processor) return;
+    this.processor = null;
+    this.available = false;
+    this.lastError = error;
+    logger.warn('Discord voice changer failed; bypassing effect', {
+      name: this.profile.name,
+      error
+    });
+  }
+
+  private stopProcessor() {
+    const processor = this.processor;
+    this.processor = null;
+    if (!processor) return;
+    processor.stdin?.end();
+    processor.kill('SIGKILL');
+  }
+}
+
+function loadVoiceChangerConfig(configPath: string): VoiceChangerConfig {
+  try {
+    const parsed = JSON.parse(readFileSync(configPath, 'utf8')) as Partial<VoiceChangerConfig>;
+    if (typeof parsed.enabled !== 'boolean') throw new Error('enabled must be a boolean');
+    if (typeof parsed.name !== 'string' || !parsed.name.trim()) throw new Error('name must be a non-empty string');
+    if (typeof parsed.ffmpegFilter !== 'string' || !parsed.ffmpegFilter.trim() || parsed.ffmpegFilter.length > 2_000) {
+      throw new Error('ffmpegFilter must be a non-empty string of at most 2000 characters');
+    }
+    return {
+      enabled: parsed.enabled,
+      name: parsed.name.trim(),
+      ffmpegFilter: parsed.ffmpegFilter.trim()
+    };
+  } catch (error) {
+    logger.warn('Could not load Discord voice changer configuration; using bypass mode', {
+      configPath,
+      error: error instanceof Error ? error.message : String(error)
+    });
+    return { enabled: false, name: 'bypass', ffmpegFilter: 'anull' };
+  }
 }
 
 class DiscordPcmMixer {

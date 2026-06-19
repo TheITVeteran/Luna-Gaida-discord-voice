@@ -1,5 +1,5 @@
 import dotenv from 'dotenv';
-import { dirname, resolve } from 'node:path';
+import { dirname, isAbsolute, resolve } from 'node:path';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
@@ -51,6 +51,7 @@ const envSchema = z.object({
   FFMPEG_BINARY: z.string().default('ffmpeg'),
   DISCORD_MUSIC_VOLUME: z.coerce.number().min(0).max(1).default(0.35),
   DISCORD_MUSIC_DUCK_VOLUME: z.coerce.number().min(0).max(1).default(0.12),
+  DISCORD_VOICE_CHANGER_CONFIG: z.string().default('./config/voice-changer.json'),
   SEARXNG_URL: z.string().url().default('http://searxng:8080'),
   GIF_PROVIDER: z.enum(['auto', 'giphy', 'tenor']).default('auto'),
   GIPHY_API_KEY: z.string().optional(),
@@ -64,9 +65,21 @@ export function loadConfig() {
   const parsed = envSchema.parse(process.env);
   return {
     ...parsed,
+    DISCORD_VOICE_CHANGER_CONFIG: resolveProjectFile(parsed.DISCORD_VOICE_CHANGER_CONFIG),
     allowedOrigins: parsed.GIADA_ALLOWED_ORIGINS.split(',').map((origin) => origin.trim()).filter(Boolean),
     databasePath: parsed.GIADA_DATABASE_URL.startsWith('file:')
       ? parsed.GIADA_DATABASE_URL.slice('file:'.length)
       : parsed.GIADA_DATABASE_URL
   };
+}
+
+function resolveProjectFile(path: string) {
+  if (isAbsolute(path)) return path;
+  const candidates = [
+    resolve(process.cwd(), path),
+    resolve(here, '../../../', path),
+    resolve(here, '../../../../', path),
+    resolve(here, '../../../../../', path)
+  ];
+  return candidates.find((candidate) => existsSync(candidate)) ?? candidates[0]!;
 }

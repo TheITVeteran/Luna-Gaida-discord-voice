@@ -135,7 +135,10 @@ YTDLP_COOKIES_FROM_BROWSER=firefox
 FFMPEG_BINARY=ffmpeg
 DISCORD_MUSIC_VOLUME=0.35
 DISCORD_MUSIC_DUCK_VOLUME=0.12
+DISCORD_VOICE_CHANGER_CONFIG=./config/voice-changer.json
 ```
+
+Discord voice output passes Giada's generated speech (not music) through the FFmpeg filter in `config/voice-changer.json`. The default enabled `anime-girl` preset raises pitch, brightens the voice, and applies light compression while preserving approximate speaking speed. Set `enabled` to `false` for bypass mode, or replace `ffmpegFilter` with any filter chain supported by the installed FFmpeg build. The file is polled once per second and hot reloaded without reconnecting Discord. If the file or filter is invalid, Giada logs the error and falls back to unmodified speech.
 
 For Docker/server deployments, export YouTube cookies in Netscape `cookies.txt` format on a machine where YouTube works, then copy them to:
 

@@ -21,6 +21,7 @@ services:
     volumes:
       - giada_data:/app/data
       - ./secrets:/run/secrets:ro
+      - giada_config:/app/config:ro
     depends_on:
       searxng:
         condition: service_started
@@ -61,5 +62,6 @@ networks:
 
 volumes:
   giada_data:
+  giada_config:
   searxng_data:
   searxng_cache:
