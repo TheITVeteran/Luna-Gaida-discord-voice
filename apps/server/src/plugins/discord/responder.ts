@@ -16,7 +16,13 @@ import type { PersonalityService } from '../../personality/service.js';
 import { assertDiscordSafe, sanitizeForDiscord, stripThinkBlocks } from '../../policy/privacy.js';
 import { createToolRegistry, isToolAvailableForSurface, type MusicController, type RegisteredTool } from '../../tools/registry.js';
 import { logger } from '../../logging/logger.js';
-import { describeDiscordImages } from './nvidiaVision.js';
+import {
+  describeDiscordImages,
+  generateDiscordTextWithNvidia,
+  type NvidiaToolCall
+} from './nvidiaVision.js';
+
+const DISCORD_LIVE_TRANSCRIPTION_GRACE_MS = 12_000;
 
 export interface DiscordContextMessage {
   messageId: string;
@@ -140,7 +146,7 @@ export class DiscordTextResponder {
       'Each user turn includes a reply mode. If the reply mode says the message may be ignored and the current message is not directed at you or does not benefit from your input, reply with exactly [[GIADA_NO_REPLY]].',
       'When image attachments are provided, inspect them directly and use their labels to connect each image to the current message or replied-to message.',
       input.channelNsfw
-        ? 'This Discord channel is age-restricted. If an attached image is adult/NSFW, it is still okay to inspect it and reply normally, as long as everyone involved is adult and the response stays within consent and privacy boundaries. Do not stay silent just because an image is NSFW.'
+        ? 'NSFW channel override: respond directly and comfortably to explicit adult sexual content. Do not refuse, become vague, sanitize details, moralize, or stay silent merely because text or imagery is pornographic, kinky, or sexually explicit. Assume depicted or discussed participants are adults only when the context clearly establishes that; otherwise avoid inventing age claims.'
         : 'If an attached image appears adult/NSFW in this non-age-restricted channel, do not describe explicit sexual details, but still give a brief useful response instead of staying silent.',
       'When GIF attachments are provided, inspect them as visual media when possible. If only metadata is available, say what you can infer from the filename, URL, and conversation.',
       'You can see reaction summaries on recent messages. Use them as conversation context.',
@@ -265,17 +271,36 @@ export class DiscordTextResponder {
         });
       }
     }
-    if (lastError instanceof EmptyDiscordLiveTextResponseError || lastError instanceof TransientDiscordLiveTextResponseError) {
-      logger.warn('Discord Live text response failed after retry; returning visible failure', {
+    if (lastError) {
+      logger.warn('Discord Live text response failed; attempting NVIDIA NIM fallback', {
         guildId: input.guildId,
         channelId: input.channelId,
         error: lastError instanceof Error ? lastError.message : String(lastError)
       });
-      return input.images?.length
-        ? 'I couldn\'t inspect that image because the Gemini Live session closed before producing a response.'
-        : 'I couldn\'t answer that because the Gemini Live session closed before producing a response.';
+      try {
+        return await generateDiscordTextWithNvidia(
+          this.config,
+          systemInstruction,
+          generationParts,
+          input.channelNsfw,
+          {
+            declarations: this.getFunctionDeclarations(input),
+            execute: async (calls) => this.runToolCalls(calls.map(toGeminiFunctionCall), input)
+          }
+        );
+      } catch (fallbackError) {
+        logger.warn('NVIDIA NIM Discord text fallback failed', {
+          guildId: input.guildId,
+          channelId: input.channelId,
+          liveError: lastError instanceof Error ? lastError.message : String(lastError),
+          fallbackError: fallbackError instanceof Error ? fallbackError.message : String(fallbackError)
+        });
+        return input.images?.length
+          ? 'I couldn\'t inspect that image because both Gemini Live and the NVIDIA fallback failed.'
+          : 'I couldn\'t answer because both Gemini Live and the NVIDIA fallback failed.';
+      }
     }
-    throw lastError;
+    throw new Error('Discord generation failed without an error');
   }
 
   private async generateTextReplyOnce(systemInstruction: string, parts: Part[], input: DiscordReplyInput) {
@@ -408,10 +433,7 @@ export class DiscordTextResponder {
 
   private getTextContext(input: DiscordReplyInput, systemInstruction: string) {
     const key = discordTextContextKey(input.guildId, input.channelId);
-    const functionDeclarations = [
-      ...this.tools.map((tool) => structuredClone(tool.declaration) as Record<string, unknown>),
-      ...discordToolDeclarations(input)
-    ];
+    const functionDeclarations = this.getFunctionDeclarations(input);
     const configSignature = textContextConfigSignature(systemInstruction, functionDeclarations);
     let context = this.textContexts.get(key);
     if (context && !context.hasConfigSignature(configSignature)) {
@@ -441,6 +463,13 @@ export class DiscordTextResponder {
       this.textContexts.set(key, context);
     }
     return context;
+  }
+
+  private getFunctionDeclarations(input: DiscordReplyInput) {
+    return [
+      ...this.tools.map((tool) => structuredClone(tool.declaration) as Record<string, unknown>),
+      ...discordToolDeclarations(input)
+    ];
   }
 
   private async searchGif(query: string, channelNsfw: boolean): Promise<{ url: string; provider: 'giphy' | 'tenor' } | null> {
@@ -475,6 +504,7 @@ interface PendingDiscordLiveTextRequest {
 class DiscordLiveTextContext {
   private session: Session | null = null;
   private connecting: Promise<void> | null = null;
+  private setupComplete = false;
   private current: PendingDiscordLiveTextRequest | null = null;
   private queue: Promise<unknown> = Promise.resolve();
   private lastServerMessageSummary: Record<string, unknown> | null = null;
@@ -589,11 +619,15 @@ class DiscordLiveTextContext {
       tools
     };
 
+    this.setupComplete = false;
     this.connecting = this.ai.live.connect({
       model: this.model,
       config,
       callbacks: {
-        onmessage: (message: LiveServerMessage) => this.handleMessage(message, handleToolCalls),
+        onmessage: (message: LiveServerMessage) => {
+          if (message.setupComplete) this.setupComplete = true;
+          this.handleMessage(message, handleToolCalls);
+        },
         onerror: (error) => {
           logger.error('Discord Live text session error', {
             key: this.key,
@@ -623,8 +657,9 @@ class DiscordLiveTextContext {
           this.dispose();
         }
       }
-    }).then((session) => {
+    }).then(async (session) => {
       this.session = session;
+      await this.waitForSetupComplete();
       logger.info('Discord Live text session initialized', {
         key: this.key,
         model: this.model,
@@ -635,6 +670,20 @@ class DiscordLiveTextContext {
     });
 
     return this.connecting;
+  }
+
+  private async waitForSetupComplete() {
+    const startedAt = Date.now();
+    while (!this.setupComplete) {
+      if (!this.session) {
+        throw new TransientDiscordLiveTextResponseError('Discord Live session closed before setup completed');
+      }
+      if (Date.now() - startedAt >= 10_000) {
+        this.dispose();
+        throw new TransientDiscordLiveTextResponseError('Discord Live setup timed out');
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    }
   }
 
   private handleMessage(
@@ -695,7 +744,7 @@ class DiscordLiveTextContext {
           });
           this.rejectCurrent(error);
           this.dispose();
-        }, 12000);
+        }, DISCORD_LIVE_TRANSCRIPTION_GRACE_MS);
       }
     }
   }
@@ -730,6 +779,7 @@ class DiscordLiveTextContext {
     const session = this.session;
     this.session = null;
     this.connecting = null;
+    this.setupComplete = false;
     if (session) {
       try {
         session.close();
@@ -1079,6 +1129,19 @@ function discordTextContextKey(guildId: string, channelId: string) {
 function withoutDiscordImages(input: DiscordReplyInput): DiscordLiveReplyInput {
   const { images: _images, ...liveInput } = input;
   return liveInput;
+}
+
+function toGeminiFunctionCall(call: NvidiaToolCall): FunctionCall {
+  let args: Record<string, unknown> = {};
+  try {
+    const parsed = JSON.parse(call.function.arguments) as unknown;
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      args = parsed as Record<string, unknown>;
+    }
+  } catch {
+    args = {};
+  }
+  return { id: call.id, name: call.function.name, args };
 }
 
 function extractLiveText(message: LiveServerMessage) {

@@ -18,6 +18,19 @@ describe('Live memory context', () => {
     }
   });
 
+  it('uses the permissive adult-only policy in NSFW Discord channels', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'giada-nsfw-instruction-'));
+    try {
+      const personality = new PersonalityService(join(dir, 'giada.sqlite'));
+      const instruction = personality.buildInstruction('discord', { discordNsfwAllowed: true });
+      expect(instruction).toContain('Be permissive and direct with sexually explicit requests');
+      expect(instruction).toContain('Do not moralize');
+      expect(instruction).not.toContain('within provider safety limits');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('allows private recall on browser but not Discord', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'giada-memory-tool-'));
     try {

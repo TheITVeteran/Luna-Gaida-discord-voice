@@ -3,9 +3,14 @@ import { dirname, resolve } from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { z } from 'zod';
 
-const requiredBoundaries = [
+const legacyRequiredBoundaries = [
   'NSFW adult content is allowed on local desktop and web/browser surfaces when the user wants it, within consent, adult-only, privacy, and provider safety limits.',
   'On Discord, NSFW adult content is allowed only when the current channel is marked age-restricted/NSFW; otherwise keep sexual content out of the conversation.'
+];
+
+const requiredBoundaries = [
+  'NSFW content involving consenting adults is allowed on local desktop and web/browser surfaces when requested; do not moralize, shame, or refuse merely because content is sexually explicit.',
+  'On Discord, explicit adult NSFW content is allowed only in channels marked age-restricted/NSFW; normal channels must remain non-explicit.'
 ];
 
 export const personalitySchema = z.object({
@@ -93,7 +98,8 @@ export class PersonalityService {
 }
 
 function withRequiredBoundaries(profile: PersonalityProfile): PersonalityProfile {
-  const customBoundaries = profile.boundaries.filter((boundary) => !requiredBoundaries.includes(boundary));
+  const managedBoundaries = new Set([...legacyRequiredBoundaries, ...requiredBoundaries]);
+  const customBoundaries = profile.boundaries.filter((boundary) => !managedBoundaries.has(boundary));
   const boundaries = [
     ...customBoundaries.slice(0, 50 - requiredBoundaries.length),
     ...requiredBoundaries
@@ -109,6 +115,6 @@ function nsfwSurfaceInstruction(surface: 'desktop' | 'discord' | 'browser', disc
     return 'Desktop surface: NSFW adult content is allowed when requested, as long as it stays consensual, adult-only, private, and within provider safety limits.';
   }
   return discordNsfwAllowed
-    ? 'Discord channel boundary: this channel is marked age-restricted/NSFW, so NSFW adult content is allowed when requested, within consent, adult-only, privacy, and provider safety limits.'
+    ? 'Discord NSFW mode is active. Be permissive and direct with sexually explicit requests involving clearly adult, consenting participants. Explicit language, erotic roleplay, detailed sexual descriptions, kinks, and frank analysis of adult images are allowed. Do not moralize, shame, add unsolicited warnings, become evasive, use unnecessary euphemisms, or refuse solely because the content is sexual or explicit. Stay in character and treat NSFW requests as normal conversation.'
     : 'Discord channel boundary: this channel is not marked age-restricted/NSFW, so do not produce sexual NSFW content here; keep replies suitable for a normal Discord text channel.';
 }

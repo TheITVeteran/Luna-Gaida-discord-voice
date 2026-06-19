@@ -40,7 +40,8 @@ describe('personality boundaries', () => {
 
       expect(webInstruction).toContain('Web/browser surface: NSFW adult content is allowed');
       expect(discordSafeInstruction).toContain('this channel is not marked age-restricted/NSFW');
-      expect(discordNsfwInstruction).toContain('this channel is marked age-restricted/NSFW');
+      expect(discordNsfwInstruction).toContain('Discord NSFW mode is active');
+      expect(discordNsfwInstruction).toContain('Be permissive and direct with sexually explicit requests');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

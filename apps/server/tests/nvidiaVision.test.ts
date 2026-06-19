@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   calculateNvidiaRetryDelay,
   extractMessageText,
-  isRetryableNvidiaStatus
+  isRetryableNvidiaStatus,
+  toOpenAiToolDeclaration
 } from '../src/plugins/discord/nvidiaVision.js';
 
 describe('NVIDIA vision response parsing', () => {
@@ -30,5 +31,32 @@ describe('NVIDIA vision response parsing', () => {
     expect(calculateNvidiaRetryDelay('120', 0)).toBe(60_000);
     expect(calculateNvidiaRetryDelay(null, 0, 0, () => 0.5)).toBe(1_000);
     expect(calculateNvidiaRetryDelay(null, 2, 0, () => 0.5)).toBe(4_000);
+  });
+
+  it('converts Gemini declarations to OpenAI-compatible tools', () => {
+    expect(toOpenAiToolDeclaration({
+      name: 'exampleTool',
+      description: 'Example.',
+      parameters: {
+        type: 'OBJECT',
+        properties: {
+          query: { type: 'STRING' },
+          tags: { type: 'ARRAY', items: { type: 'STRING' } }
+        }
+      }
+    })).toEqual({
+      type: 'function',
+      function: {
+        name: 'exampleTool',
+        description: 'Example.',
+        parameters: {
+          type: 'object',
+          properties: {
+            query: { type: 'string' },
+            tags: { type: 'array', items: { type: 'string' } }
+          }
+        }
+      }
+    });
   });
 });
