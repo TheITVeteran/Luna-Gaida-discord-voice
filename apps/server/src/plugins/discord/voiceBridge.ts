@@ -11,6 +11,7 @@ import {
   type VoiceConnectionState
 } from '@discordjs/voice';
 import { spawn } from 'node:child_process';
+import { statSync } from 'node:fs';
 import { PassThrough } from 'node:stream';
 import prism from 'prism-media';
 import type { AppConfig } from '../../config/env.js';
@@ -702,7 +703,10 @@ export class DiscordVoiceBridge implements MusicController, VoiceController {
         query: normalized,
         ytDlpBinary: this.config.YTDLP_BINARY,
         playerClients: this.config.YTDLP_PLAYER_CLIENTS,
-        cookiesConfigured: Boolean(this.config.YTDLP_COOKIES_PATH || this.config.YTDLP_COOKIES_FROM_BROWSER),
+        cookiesConfigured: Boolean(
+          (this.config.YTDLP_COOKIES_PATH && isRegularFile(this.config.YTDLP_COOKIES_PATH))
+          || this.config.YTDLP_COOKIES_FROM_BROWSER
+        ),
         error: message
       });
       return { ok: false, error: message };
@@ -1490,7 +1494,7 @@ function ytDlpCommonArgs(config: AppConfig) {
     `youtube:player_client=${config.YTDLP_PLAYER_CLIENTS}`
   ];
   const cookiesPath = config.YTDLP_COOKIES_PATH?.trim();
-  if (cookiesPath) {
+  if (cookiesPath && isRegularFile(cookiesPath)) {
     args.push('--cookies', cookiesPath);
   }
   const cookiesFromBrowser = config.YTDLP_COOKIES_FROM_BROWSER?.trim();
@@ -1500,9 +1504,20 @@ function ytDlpCommonArgs(config: AppConfig) {
   return args;
 }
 
+function isRegularFile(path: string) {
+  try {
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
 function compactYtDlpError(error: unknown) {
   const raw = error instanceof Error ? error.message : String(error);
   const errorLine = raw.split(/\r?\n/).reverse().find((line) => line.startsWith('ERROR:')) ?? raw.split(/\r?\n/).find(Boolean) ?? raw;
+  if (/Sign in to confirm you.re not a bot|cookies-from-browser|authentication/i.test(raw)) {
+    return 'YouTube requires authenticated cookies for this server IP. Export fresh Netscape-format cookies to the configured YTDLP_COOKIES_PATH and restart the service.';
+  }
   if (/HTTP Error 403|Forbidden|unable to download video data/i.test(raw)) {
     return 'YouTube blocked the media download with HTTP 403. Update yt-dlp first; if it still fails, configure YTDLP_COOKIES_PATH or YTDLP_COOKIES_FROM_BROWSER.';
   }

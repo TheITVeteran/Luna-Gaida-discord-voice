@@ -5,6 +5,8 @@ target/
 .env.docker
 .env.local
 *.log
+secrets/*
+!secrets/.gitkeep
 apps/server/data/
 apps/desktop/src-tauri/target/
 oldCode

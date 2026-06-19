@@ -134,6 +134,14 @@ DISCORD_MUSIC_VOLUME=0.35
 DISCORD_MUSIC_DUCK_VOLUME=0.12
 ```
 
+For Docker/server deployments, export YouTube cookies in Netscape `cookies.txt` format on a machine where YouTube works, then copy them to:
+
+```text
+./secrets/youtube-cookies.txt
+```
+
+`compose.yml` mounts that directory read-only and sets `YTDLP_COOKIES_PATH=/run/secrets/youtube-cookies.txt` inside the container. Create the file before starting the container, restrict its host permissions (for example `chmod 600 secrets/youtube-cookies.txt`), and never commit it. Do not use `YTDLP_COOKIES_FROM_BROWSER` in Docker unless that browser profile is deliberately mounted into the container. YouTube cookies expire or may be invalidated, so repeat the export when anti-bot errors return.
+
 Discord bot voice video or Go Live stream viewing is not implemented because the official discord.js/@discordjs/voice bot stack used here exposes voice audio receive/send, not supported video stream capture for bots.
 
 Slash command delivery is supported in two modes:
