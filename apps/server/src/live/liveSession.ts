@@ -18,6 +18,7 @@ import type { PersonalityService } from '../personality/service.js';
 import { createToolRegistry, isToolAvailableForSurface, type MusicController, type RegisteredTool, type ToolContext, type VoiceController } from '../tools/registry.js';
 import { logger } from '../logging/logger.js';
 import { appendTurnText, ConversationHistory } from './conversationHistory.js';
+import { OutputVoiceChanger } from './outputVoiceChanger.js';
 
 export type LiveSurface = 'desktop' | 'discord' | 'browser';
 
@@ -65,6 +66,7 @@ export class LiveSessionManager {
   private textTurnResolve: (() => void) | null = null;
   private screenShareActive = false;
   private latestScreenFrame: { data: string; mimeType: string; receivedAt: number } | null = null;
+  private outputVoiceChanger: OutputVoiceChanger | null = null;
 
   constructor(
     private readonly config: AppConfig,
@@ -201,7 +203,14 @@ export class LiveSessionManager {
     this.finishTextTurn();
     this.screenShareActive = false;
     this.latestScreenFrame = null;
+    this.outputVoiceChanger?.reset();
     this.emitStatus('offline');
+  }
+
+  dispose() {
+    this.close();
+    this.outputVoiceChanger?.destroy();
+    this.outputVoiceChanger = null;
   }
 
   private async handleTextInput(text: string, surface: LiveSurface) {
@@ -526,7 +535,11 @@ export class LiveSessionManager {
         }
       }
       this.emit?.({ type: 'avatar.state', payload: { state: 'speaking' } });
-      this.emit?.({ type: 'audio', data: audio.data, mimeType: audio.mimeType });
+      if (surface === 'discord') {
+        this.emit?.({ type: 'audio', data: audio.data, mimeType: audio.mimeType });
+      } else {
+        this.getOutputVoiceChanger().process(Buffer.from(audio.data, 'base64'));
+      }
     }
 
     if (message.toolCall?.functionCalls?.length) {
@@ -631,6 +644,22 @@ export class LiveSessionManager {
     this.currentTurnHasOutput = false;
     this.textTurnServerComplete = false;
     resolve?.();
+  }
+
+  private getOutputVoiceChanger() {
+    if (!this.outputVoiceChanger) {
+      this.outputVoiceChanger = new OutputVoiceChanger(
+        this.config.FFMPEG_BINARY,
+        this.config.DISCORD_VOICE_CHANGER_CONFIG,
+        24_000,
+        (pcm) => this.emit?.({
+          type: 'audio',
+          data: pcm.toString('base64'),
+          mimeType: 'audio/pcm;rate=24000'
+        })
+      );
+    }
+    return this.outputVoiceChanger;
   }
 }
 

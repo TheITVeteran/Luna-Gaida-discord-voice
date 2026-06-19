@@ -49,7 +49,7 @@ export function attachRealtimeServer(server: Server, createLive: (context: Realt
         return;
       }
     }
-    liveContexts.get(context)?.close();
+    liveContexts.get(context)?.dispose();
   };
 
   const sendStatus = (context: RealtimeContext) => {
