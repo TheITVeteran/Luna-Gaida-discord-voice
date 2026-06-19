@@ -15,6 +15,7 @@ services:
       FFMPEG_BINARY: ffmpeg
       YTDLP_BINARY: yt-dlp
       YTDLP_COOKIES_PATH: /run/secrets/youtube-cookies.txt
+      YTDLP_POT_PROVIDER_URL: http://bgutil-provider:4416
     ports:
       - "8787:8787"
     volumes:
@@ -23,6 +24,25 @@ services:
     depends_on:
       searxng:
         condition: service_started
+      bgutil-provider:
+        condition: service_healthy
+
+  bgutil-provider:
+    image: brainicism/bgutil-ytdlp-pot-provider:latest
+    restart: unless-stopped
+    init: true
+    expose:
+      - "4416"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:4416/ping').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
 
   searxng:
     image: docker.io/searxng/searxng:latest

@@ -22,8 +22,19 @@ WORKDIR /app
 ENV NODE_ENV=production
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates ffmpeg python3 python3-pip \
-  && python3 -m pip install --break-system-packages --no-cache-dir -U "yt-dlp[default]" \
+  && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    unzip \
+    ffmpeg \
+    python3 \
+    python3-pip \
+  && python3 -m pip install --break-system-packages --no-cache-dir -U "yt-dlp[default]" bgutil-ytdlp-pot-provider \
+  && curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh \
+  && command -v deno \
+  && deno --version \
+  && command -v yt-dlp \
+  && yt-dlp --version \
   && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /app/package.json /app/package-lock.json ./

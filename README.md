@@ -125,6 +125,9 @@ When asked in Discord voice, Giada can search for and play music through the Liv
 ```bash
 YTDLP_BINARY=yt-dlp
 YTDLP_PLAYER_CLIENTS=default
+YTDLP_JS_RUNTIME=deno
+YTDLP_REMOTE_COMPONENTS=ejs:github
+YTDLP_POT_PROVIDER_URL=http://127.0.0.1:4416
 # Optional, useful when YouTube blocks anonymous media downloads:
 YTDLP_COOKIES_PATH=/path/to/youtube-cookies.txt
 # or:
@@ -141,6 +144,16 @@ For Docker/server deployments, export YouTube cookies in Netscape `cookies.txt` 
 ```
 
 `compose.yml` mounts that directory read-only and sets `YTDLP_COOKIES_PATH=/run/secrets/youtube-cookies.txt` inside the container. Giada copies it to private writable runtime storage because yt-dlp rewrites its cookie jar after use; the host secret remains read-only. Create the file before starting the container, restrict its host permissions (for example `chmod 600 secrets/youtube-cookies.txt`), and never commit it. Do not use `YTDLP_COOKIES_FROM_BROWSER` in Docker unless that browser profile is deliberately mounted into the container. YouTube cookies expire or may be invalidated, so repeat the export when anti-bot errors return.
+
+Compose also runs an internal `bgutil-provider` service and installs its yt-dlp plugin to generate the per-video GVS PO tokens increasingly required by YouTube. The provider is exposed only to the internal Compose network; no host port is published. Native deployments can run the provider separately and set `YTDLP_POT_PROVIDER_URL` to its base URL.
+
+To verify the provider from inside Compose, include its internal URL explicitly:
+
+```bash
+docker compose exec giada yt-dlp -v --simulate \
+  --extractor-args "youtubepot-bgutilhttp:base_url=http://bgutil-provider:4416" \
+  "https://www.youtube.com/watch?v=ayVuQLT00v0"
+```
 
 Discord bot voice video or Go Live stream viewing is not implemented because the official discord.js/@discordjs/voice bot stack used here exposes voice audio receive/send, not supported video stream capture for bots.
 

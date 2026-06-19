@@ -35,7 +35,7 @@ const ASSISTANT_DUCK_HOLD_MS = 650;
 const MUSIC_QUEUE_HIGH_WATER_BYTES = DISCORD_RATE * DISCORD_CHANNELS * 2 * 12;
 const MUSIC_QUEUE_LOW_WATER_BYTES = DISCORD_RATE * DISCORD_CHANNELS * 2 * 6;
 const YTDLP_SEARCH_RESULTS = 5;
-const YTDLP_AUDIO_FORMAT = 'bestaudio[ext=m4a]/bestaudio/best[acodec!=none]/best';
+const YTDLP_AUDIO_FORMAT = 'ba[protocol*=m3u8]/b[protocol*=m3u8]/ba/bestaudio/best';
 
 interface DiscordMusicStatus {
   state: 'idle' | 'searching' | 'playing' | 'paused' | 'stopping' | 'error';
@@ -1503,6 +1503,10 @@ function hasAudioFormat(parsed: {
 
 function ytDlpCommonArgs(config: AppConfig, playerClients = config.YTDLP_PLAYER_CLIENTS) {
   const args: string[] = [
+    '--remote-components',
+    config.YTDLP_REMOTE_COMPONENTS,
+    '--js-runtimes',
+    config.YTDLP_JS_RUNTIME,
     '--extractor-args',
     `youtube:player_client=${playerClients}`
   ];
@@ -1516,6 +1520,13 @@ function ytDlpCommonArgs(config: AppConfig, playerClients = config.YTDLP_PLAYER_
   const cookiesFromBrowser = config.YTDLP_COOKIES_FROM_BROWSER?.trim();
   if (cookiesFromBrowser) {
     args.push('--cookies-from-browser', cookiesFromBrowser);
+  }
+  const potProviderUrl = config.YTDLP_POT_PROVIDER_URL?.trim();
+  if (potProviderUrl) {
+    args.push(
+      '--extractor-args',
+      `youtubepot-bgutilhttp:base_url=${potProviderUrl}`
+    );
   }
   return args;
 }
@@ -1563,7 +1574,7 @@ function compactYtDlpError(error: unknown) {
     return 'yt-dlp could not update its cookie jar because the configured file is read-only. Restart with the writable runtime-cookie copy enabled.';
   }
   if (/HTTP Error 403|Forbidden|unable to download video data/i.test(raw)) {
-    return 'YouTube blocked the media download with HTTP 403. Update yt-dlp first; if it still fails, configure YTDLP_COOKIES_PATH or YTDLP_COOKIES_FROM_BROWSER.';
+    return 'YouTube blocked the media download with HTTP 403. Verify fresh cookies, Deno JS challenge support, and yt-dlp EJS remote components; a PO-token provider may still be required.';
   }
   if (/Precondition check failed|Signature extraction failed|Requested format is not available|Only images are available/i.test(raw)) {
     return `YouTube audio extraction failed (${errorLine.replace(/^ERROR:\s*/, '')}). Updating yt-dlp may be required.`;
