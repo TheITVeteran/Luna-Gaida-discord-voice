@@ -1,30 +1,24 @@
 .plan-row {
   width: 100%;
-  border: 0;
-  background: transparent;
+  border: 1px solid rgba(142, 172, 237, 0.12);
+  border-radius: 5px;
+  background: rgba(7, 24, 74, 0.15) !important;
   color: inherit;
   cursor: pointer;
   text-align: left;
-  transition: background 0.15s ease;
+  padding: 14px 18px !important;
+  margin-top: 10px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  transition: all 0.15s ease;
+  box-shadow: var(--shadow-lg);
 }
 
 .plan-row:hover {
-  background: rgba(50, 115, 244, 0.08);
-}
-
-.section-body > .row button, .row > .danger {
-  border: 1px solid rgba(255, 155, 155, 0.25);
-  background: rgba(255, 155, 155, 0.04);
-  color: #ff9b9b;
-  border-radius: 5px;
-  padding: 6px 12px;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.section-body > .row button:hover, .row > .danger:hover {
-  background: rgba(255, 155, 155, 0.15);
-  border-color: #ff9b9b;
+  background: rgba(50, 115, 244, 0.1) !important;
+  border-color: var(--color-lavender-accent) !important;
+  box-shadow: var(--shadow-md) !important;
 }
 
 /* Pricing Plan Cards */
@@ -82,21 +76,9 @@
   justify-content: flex-end;
   gap: 8px;
 }
-
 .row-actions button {
-  border: 1px solid rgba(142, 172, 237, 0.15);
-  color: var(--color-lilac-white);
-  background: rgba(7, 24, 74, 0.25);
-  border-radius: 5px;
   padding: 6px 12px;
-  cursor: pointer;
-  transition: all 0.15s ease;
   font-size: 12px;
-}
-
-.row-actions button:hover {
-  background: rgba(50, 115, 244, 0.10);
-  border-color: var(--color-lavender-accent);
 }
 
 /* Key Editor layouts */

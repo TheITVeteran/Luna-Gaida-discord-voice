@@ -27,22 +27,6 @@
   grid-template-columns: 1fr;
 }
 
-.channel-add button, .channel-item button {
-  background: rgba(7, 24, 74, 0.25);
-  border: 1px solid rgba(142, 172, 237, 0.15);
-  border-radius: 5px;
-  color: var(--color-lilac-white);
-  cursor: pointer;
-  padding: 9px 14px;
-  font-weight: 500;
-  transition: all 0.15s ease;
-}
-
-.channel-add button:hover, .channel-item button:hover:not(.danger) {
-  background: rgba(50, 115, 244, 0.1);
-  border-color: var(--color-lavender-accent);
-}
-
 .channel-list {
   display: flex;
   flex-direction: column;
