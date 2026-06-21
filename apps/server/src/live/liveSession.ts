@@ -63,6 +63,7 @@ export class LiveSessionManager {
   private currentTurnHasOutput = false;
   private textTurnServerComplete = false;
   private textTurnTimer: ReturnType<typeof setTimeout> | null = null;
+  private textTranscriptSettleTimer: ReturnType<typeof setTimeout> | null = null;
   private textTurnResolve: (() => void) | null = null;
   private screenShareActive = false;
   private latestScreenFrame: { data: string; mimeType: string; receivedAt: number } | null = null;
@@ -525,13 +526,9 @@ export class LiveSessionManager {
       if (shouldTrackConversation(surface)) {
         this.assistantTurnText = appendTurnText(this.assistantTurnText, outputText);
       }
-      this.emit?.({ type: 'transcript', speaker: 'assistant', text: outputText, final: Boolean(message.serverContent?.turnComplete) });
+      this.emit?.({ type: 'transcript', speaker: 'assistant', text: outputText, final: false });
       if (textResponse && this.textTurnServerComplete) {
-        if (shouldTrackConversation(surface) && this.assistantTurnText) {
-          this.conversationHistory.add('model', this.assistantTurnText);
-          this.assistantTurnText = '';
-        }
-        this.finishTextTurn();
+        this.scheduleTextTranscriptSettlement(surface, 1_200);
       }
     }
 
@@ -544,9 +541,7 @@ export class LiveSessionManager {
     for (const audio of audioParts) {
       if (textResponse) {
         this.currentTurnHasOutput = true;
-        if (this.textTurnServerComplete) {
-          this.finishTextTurn();
-        }
+        if (this.textTurnServerComplete) this.scheduleTextTranscriptSettlement(surface, this.assistantTurnText ? 1_200 : 12_000);
       }
       this.emit?.({ type: 'avatar.state', payload: { state: 'speaking' } });
       if (surface === 'discord') {
@@ -620,30 +615,11 @@ export class LiveSessionManager {
     }
 
     if (message.serverContent?.turnComplete) {
-      if (shouldTrackConversation(surface) && this.assistantTurnText) {
-        this.conversationHistory.add('model', this.assistantTurnText);
-        this.assistantTurnText = '';
-      }
       if (textResponse) {
         this.textTurnServerComplete = true;
-        if (this.currentTurnHasOutput) {
-          this.finishTextTurn();
-        } else {
-          if (this.textTurnTimer) {
-            clearTimeout(this.textTurnTimer);
-          }
-          this.textTurnTimer = setTimeout(() => {
-            this.emit?.({
-              type: 'response.empty',
-              reason: 'Gemini completed the text turn without transcript or audio'
-            });
-            this.finishTextTurn();
-            this.textSession?.close();
-            this.textSession = null;
-          }, 12_000);
-        }
+        this.scheduleTextTranscriptSettlement(surface, this.assistantTurnText ? 1_200 : 12_000);
       }
-      this.emit?.({ type: 'avatar.state', payload: { state: 'idle' } });
+      if (!textResponse) this.emit?.({ type: 'avatar.state', payload: { state: 'idle' } });
     }
   }
 
@@ -652,12 +628,36 @@ export class LiveSessionManager {
       clearTimeout(this.textTurnTimer);
       this.textTurnTimer = null;
     }
+    if (this.textTranscriptSettleTimer) {
+      clearTimeout(this.textTranscriptSettleTimer);
+      this.textTranscriptSettleTimer = null;
+    }
     const resolve = this.textTurnResolve;
     this.textTurnResolve = null;
     this.textTurnPending = false;
     this.currentTurnHasOutput = false;
     this.textTurnServerComplete = false;
     resolve?.();
+  }
+
+  private scheduleTextTranscriptSettlement(surface: LiveSurface, delayMs: number) {
+    if (this.textTurnTimer) {
+      clearTimeout(this.textTurnTimer);
+      this.textTurnTimer = null;
+    }
+    if (this.textTranscriptSettleTimer) clearTimeout(this.textTranscriptSettleTimer);
+    this.textTranscriptSettleTimer = setTimeout(() => {
+      this.textTranscriptSettleTimer = null;
+      if (this.assistantTurnText) {
+        this.emit?.({ type: 'transcript', speaker: 'assistant', text: this.assistantTurnText, final: true });
+        if (shouldTrackConversation(surface)) this.conversationHistory.add('model', this.assistantTurnText);
+        this.assistantTurnText = '';
+      } else if (!this.currentTurnHasOutput) {
+        this.emit?.({ type: 'response.empty', reason: 'Gemini completed the text turn without transcript or audio' });
+      }
+      this.emit?.({ type: 'avatar.state', payload: { state: 'idle' } });
+      this.finishTextTurn();
+    }, delayMs);
   }
 
   private getOutputVoiceChanger() {

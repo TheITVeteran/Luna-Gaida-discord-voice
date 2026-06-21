@@ -29,6 +29,7 @@ import {
 } from './nvidiaVision.js';
 
 const DISCORD_LIVE_TRANSCRIPTION_GRACE_MS = 12_000;
+const DISCORD_LIVE_TRANSCRIPTION_SETTLE_MS = 1_200;
 
 export interface DiscordContextMessage {
   messageId: string;
@@ -236,7 +237,7 @@ export class DiscordTextResponder {
       return null;
     }
     const safe = assertDiscordSafe(sanitizeForDiscord(visibleText));
-    return safe.ok ? clampDiscordMessage(safe.text) : safe.text;
+    return safe.text;
   }
 
   private async resolveProvider(guildId: string) {
@@ -676,6 +677,7 @@ interface PendingDiscordLiveTextRequest {
   audioParts: number;
   timeout: ReturnType<typeof setTimeout>;
   turnCompleteTimer: ReturnType<typeof setTimeout> | null;
+  serverComplete: boolean;
   resolve: (value: string) => void;
   reject: (error: unknown) => void;
 }
@@ -749,6 +751,7 @@ class DiscordLiveTextContext {
         audioParts: 0,
         timeout,
         turnCompleteTimer: null,
+        serverComplete: false,
         resolve,
         reject
       };
@@ -878,10 +881,7 @@ class DiscordLiveTextContext {
     const text = extractLiveText(message);
     if (text) {
       current.outputText = appendTranscriptText(current.outputText, text);
-      if (current.turnCompleteTimer && current.outputText.trim()) {
-        this.resolveCurrent(current.outputText.trim());
-        return;
-      }
+      if (current.serverComplete) this.scheduleCurrentCompletion(current, DISCORD_LIVE_TRANSCRIPTION_SETTLE_MS);
     }
     current.audioParts += countAudioParts(message);
 
@@ -897,35 +897,35 @@ class DiscordLiveTextContext {
     }
 
     if (message.serverContent?.turnComplete || message.serverContent?.generationComplete) {
+      current.serverComplete = true;
+      this.scheduleCurrentCompletion(current, current.outputText.trim() ? DISCORD_LIVE_TRANSCRIPTION_SETTLE_MS : DISCORD_LIVE_TRANSCRIPTION_GRACE_MS);
+    }
+  }
+
+  private scheduleCurrentCompletion(current: PendingDiscordLiveTextRequest, delayMs: number) {
+    if (current.turnCompleteTimer) clearTimeout(current.turnCompleteTimer);
+    current.turnCompleteTimer = setTimeout(() => {
+      if (this.current !== current) return;
       if (current.outputText.trim()) {
         this.resolveCurrent(current.outputText.trim());
         return;
       }
-      if (!current.turnCompleteTimer) {
-        current.turnCompleteTimer = setTimeout(() => {
-          if (current.outputText.trim()) {
-            this.resolveCurrent(current.outputText.trim());
-            return;
-          }
-          const error = new EmptyDiscordLiveTextResponseError('Discord Live text response completed without output transcription');
-          logger.warn(error.message, {
-            key: this.key,
-            guildId: current.input.guildId,
-            channelId: current.input.channelId,
-            audioParts: current.audioParts,
-            toolCallCount: current.toolCallCount,
-            mayStaySilent: Boolean(current.input.mayStaySilent),
-            channelNsfw: current.input.channelNsfw,
-            imageCount: 0,
-            outputTextLength: current.outputText.length,
-            lastServerMessage: this.lastServerMessageSummary,
-            declaredToolNames: this.declaredToolNames
-          });
-          this.rejectCurrent(error);
-          this.dispose();
-        }, DISCORD_LIVE_TRANSCRIPTION_GRACE_MS);
-      }
-    }
+      const error = new EmptyDiscordLiveTextResponseError('Discord Live text response completed without output transcription');
+      logger.warn(error.message, {
+        key: this.key,
+        guildId: current.input.guildId,
+        channelId: current.input.channelId,
+        audioParts: current.audioParts,
+        toolCallCount: current.toolCallCount,
+        mayStaySilent: Boolean(current.input.mayStaySilent),
+        channelNsfw: current.input.channelNsfw,
+        outputTextLength: current.outputText.length,
+        lastServerMessage: this.lastServerMessageSummary,
+        declaredToolNames: this.declaredToolNames
+      });
+      this.rejectCurrent(error);
+      this.dispose();
+    }, delayMs);
   }
 
   private resolveCurrent(value: string) {
@@ -1383,11 +1383,6 @@ function appendTranscriptText(previous: string, incoming: string) {
   const needsSpace = !noSpaceBeforeIncoming && !noSpaceAfterPrevious && (wordBoundary || sentenceBoundary);
 
   return `${previous}${needsSpace ? ' ' : ''}${trimmedIncoming}`;
-}
-
-function clampDiscordMessage(text: string) {
-  const normalized = text.replace(/\s+/g, ' ').trim();
-  return normalized.length > 1900 ? `${normalized.slice(0, 1897)}...` : normalized;
 }
 
 function shouldStaySilent(text: string) {

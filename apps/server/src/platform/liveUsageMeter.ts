@@ -1,4 +1,5 @@
 import type { LiveClientEvent, LiveInputEvent, LiveSurface } from '../live/liveSession.js';
+import { appendTurnText } from '../live/conversationHistory.js';
 import { textCredits, voiceCredits } from '../providers/routing.js';
 import type { PlanFeatures } from './features.js';
 import type { PlatformStore, UsageReservation } from './store.js';
@@ -7,7 +8,7 @@ export class LiveUsageMeter {
   private reservation: UsageReservation | null = null;
   private mode: 'text' | 'voice' | null = null;
   private inputCharacters = 0;
-  private outputCharacters = 0;
+  private outputText = '';
   private inputAudioBytes = 0;
   private outputAudioBytes = 0;
 
@@ -45,7 +46,7 @@ export class LiveUsageMeter {
   };
 
   onEvent = (event: LiveClientEvent) => {
-    if (event.type === 'transcript' && event.speaker === 'assistant' && this.mode === 'text') this.outputCharacters += event.text.length;
+    if (event.type === 'transcript' && event.speaker === 'assistant' && this.mode === 'text') this.outputText = appendTurnText(this.outputText, event.text);
     if (event.type === 'audio' && this.mode === 'voice') this.outputAudioBytes += Buffer.from(event.data, 'base64').length;
     if (event.type === 'avatar.state' && event.payload.state === 'idle') void this.finish(true);
   };
@@ -55,13 +56,13 @@ export class LiveUsageMeter {
     this.reservation = null;
     if (reservation) {
       const actual = this.mode === 'text'
-        ? textCredits(this.inputCharacters, this.outputCharacters, this.features.textCharactersPerCredit)
+        ? textCredits(this.inputCharacters, this.outputText.length, this.features.textCharactersPerCredit)
         : voiceCredits(this.inputAudioBytes / 32000, this.outputAudioBytes / 48000, this.features.voiceSecondsPerCredit);
       await this.store.reconcileUsage(reservation, actual, commit);
     }
     this.mode = null;
     this.inputCharacters = 0;
-    this.outputCharacters = 0;
+    this.outputText = '';
     this.inputAudioBytes = 0;
     this.outputAudioBytes = 0;
   }

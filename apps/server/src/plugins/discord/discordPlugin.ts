@@ -1821,28 +1821,25 @@ export class DiscordPlugin implements GiadaPlugin {
   }
 
   private async reply(message: Message, content: string) {
-    const payload = {
-      content,
-      allowedMentions: allowedMentionsForContent(content)
-    };
-    await message.reply({
-      ...payload,
-      failIfNotExists: false
-    }).catch(async (error) => {
-      if (!isReplyFallbackError(error)) {
-        throw error;
+    const chunks = splitDiscordMessage(content);
+    for (const [index, chunk] of chunks.entries()) {
+      const payload = { content: chunk, allowedMentions: allowedMentionsForContent(chunk) };
+      if (index > 0) {
+        if ('send' in message.channel && typeof message.channel.send === 'function') await message.channel.send(payload);
+        continue;
       }
-      logger.warn('Discord reply target cannot be used; sending plain channel message instead', {
-        guildId: message.guildId,
-        channelId: message.channelId,
-        messageId: message.id,
-        error: error instanceof Error ? error.message : String(error)
+      await message.reply({ ...payload, failIfNotExists: false }).catch(async (error) => {
+        if (!isReplyFallbackError(error)) throw error;
+        logger.warn('Discord reply target cannot be used; sending plain channel message instead', {
+          guildId: message.guildId,
+          channelId: message.channelId,
+          messageId: message.id,
+          error: error instanceof Error ? error.message : String(error)
+        });
+        if (!('send' in message.channel) || typeof message.channel.send !== 'function') throw error;
+        await message.channel.send(payload);
       });
-      if (!('send' in message.channel) || typeof message.channel.send !== 'function') {
-        throw error;
-      }
-      await message.channel.send(payload);
-    });
+    }
   }
 
   private async replyInteraction(interaction: ChatInputCommandInteraction, content: string) {
@@ -2071,6 +2068,22 @@ function clampContextText(text: string) {
 function clampDiscordMessage(text: string) {
   const normalized = text.replace(/\s+/g, ' ').trim();
   return normalized.length > 1900 ? `${normalized.slice(0, 1897)}...` : normalized;
+}
+
+function splitDiscordMessage(text: string, limit = 1900) {
+  const chunks: string[] = [];
+  let remaining = text.trim();
+  while (remaining.length > limit) {
+    const window = remaining.slice(0, limit + 1);
+    const newline = window.lastIndexOf('\n');
+    const space = window.lastIndexOf(' ');
+    const boundary = Math.max(newline, space);
+    const splitAt = boundary >= limit * 0.6 ? boundary : limit;
+    chunks.push(remaining.slice(0, splitAt).trimEnd());
+    remaining = remaining.slice(splitAt).trimStart();
+  }
+  if (remaining) chunks.push(remaining);
+  return chunks.length ? chunks : [''];
 }
 
 function allowedMentionsForContent(content: string) {
