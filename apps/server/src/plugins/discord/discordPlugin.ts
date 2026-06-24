@@ -310,6 +310,20 @@ export class DiscordPlugin implements GiadaPlugin {
     this.client.once(Events.ClientReady, () => {
       const configuredApplicationId = this.config.DISCORD_APPLICATION_ID?.trim();
       const activeApplicationId = this.client?.application?.id ?? this.client?.user?.id;
+
+      this.client?.application?.emojis.fetch()
+        .then((emojis) => {
+          this.responder.setApplicationEmojis([...emojis.values()].map((emoji) => ({
+            id: emoji.id,
+            name: emoji.name,
+            animated: emoji.animated ?? false
+          })));
+          logger.info(`Loaded ${emojis.size} app emojis`);
+        })
+        .catch((error) => {
+          logger.error('Failed to fetch app emojis', error);
+        });
+
       logger.info('Discord bot ready', {
         user: this.client?.user?.tag,
         userId: this.client?.user?.id,
