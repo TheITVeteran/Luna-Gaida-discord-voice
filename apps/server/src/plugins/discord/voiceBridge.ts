@@ -28,6 +28,7 @@ import { voiceCredits } from '../../providers/routing.js';
 import type { PlanFeatures } from '../../platform/features.js';
 import type { MusicController, VoiceController } from '../../tools/registry.js';
 import { logger } from '../../logging/logger.js';
+import { broadcastAvatarEvent } from '../../ws/avatarBroadcast.js';
 
 const DISCORD_RATE = 48000;
 const DISCORD_CHANNELS = 2;
@@ -912,6 +913,9 @@ export class DiscordVoiceBridge implements MusicController, VoiceController {
   }
 
   private handleLiveEvent(event: LiveClientEvent) {
+    if (event.type === 'avatar.state' || event.type === 'avatar.expression' || event.type === 'avatar.model.change') {
+      broadcastAvatarEvent(event);
+    }
     if (event.type === 'avatar.state' && event.payload.state === 'idle' && this.usageReservation && this.usage) {
       const reservation = this.usageReservation;
       this.usageReservation = null;

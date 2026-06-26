@@ -4,6 +4,7 @@ import { z } from 'zod';
 import type { LiveSurface } from '../live/liveSession.js';
 import type { LiveClientEvent, LiveInputEvent } from '../live/liveSession.js';
 import { logger } from '../logging/logger.js';
+import { setAvatarBroadcaster } from './avatarBroadcast.js';
 
 const realtimeSurfaceSchema = z.enum(['app', 'browser']).optional();
 const clientEventSchema = z.discriminatedUnion('type', [
@@ -71,6 +72,16 @@ export function attachRealtimeServer(
   const sendStatus = (context: RealtimeContext) => {
     getLive(context).emitCurrentStatus();
   };
+
+  const broadcastAvatarToApp = (event: Extract<LiveClientEvent, { type: 'avatar.state' | 'avatar.expression' | 'avatar.model.change' }>) => {
+    for (const [socket, socketContext] of sockets) {
+      if (socketContext !== 'app') continue;
+      if (socket.readyState === socket.OPEN) {
+        socket.send(JSON.stringify(event));
+      }
+    }
+  };
+  setAvatarBroadcaster(broadcastAvatarToApp);
 
   wss.on('connection', async (socket: WebSocket, request: IncomingMessage) => {
     let heartbeatAlive = true;

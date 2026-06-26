@@ -2,8 +2,11 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { AvatarStage } from './components/AvatarStage';
+import { Live2DAvatarStage } from './components/Live2DAvatarStage';
 import { RealtimeClient, type CompanionState, type RealtimeEvent } from './lib/realtime';
 import './styles/app.css';
+
+const useLive2D = (import.meta.env.VITE_AVATAR_RENDERER ?? 'live2d') === 'live2d';
 
 function FloatingAvatar() {
   const client = useMemo(() => new RealtimeClient({ audioEnabled: false }), []);
@@ -28,7 +31,11 @@ function FloatingAvatar() {
       className="floating-shell"
       onPointerDown={() => void getCurrentWebviewWindow().startDragging()}
     >
-      <AvatarStage state={state} expression={expression} modelName={modelName} floating />
+      {useLive2D ? (
+        <Live2DAvatarStage state={state} expression={expression} floating />
+      ) : (
+        <AvatarStage state={state} expression={expression} modelName={modelName} floating />
+      )}
     </div>
   );
 }

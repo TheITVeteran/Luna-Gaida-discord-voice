@@ -9,16 +9,20 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
+    "setup:live2d": "node ../../scripts/setup-live2d-cubism.js",
     "typecheck": "tsc --noEmit",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml"
   },
   "dependencies": {
+    "@pixi/unsafe-eval": "^6.5.10",
     "@pixiv/three-vrm": "^3.5.2",
     "@tauri-apps/api": "^2.10.1",
     "@tauri-apps/plugin-clipboard-manager": "^2.2.2",
     "@tauri-apps/plugin-opener": "^2.5.3",
     "@types/three": "^0.182.0",
     "lucide-react": "^0.468.0",
+    "pixi-live2d-display": "^0.4.0",
+    "pixi.js": "^6.5.10",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "three": "^0.182.0"

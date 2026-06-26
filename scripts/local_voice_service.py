@@ -102,11 +102,12 @@ def main() -> int:
     whisper_model = config.get("whisper_model", "base")
     speaker_wav = config.get("speaker_wav", "")
     tts_language = config.get("tts_language", "en")
+    enable_local_tts = bool(config.get("enable_local_tts", True))
     whisper_language = config.get("whisper_language") or None
     whisper_initial_prompt = config.get("whisper_initial_prompt") or None
     whisper_no_speech_threshold = float(config.get("whisper_no_speech_threshold", 0.35))
 
-    if not speaker_wav or not Path(speaker_wav).is_file():
+    if enable_local_tts and (not speaker_wav or not Path(speaker_wav).is_file()):
         _respond({"type": "error", "message": f"speaker wav not found: {speaker_wav}"})
         return 1
 
@@ -129,6 +130,13 @@ def main() -> int:
                 )
                 _respond({"type": "stt", "id": request.get("id"), "text": text})
             elif op == "tts":
+                if not enable_local_tts:
+                    _respond({
+                        "type": "error",
+                        "id": request.get("id"),
+                        "message": "local tts disabled (use Fish Audio)",
+                    })
+                    continue
                 _synthesize(
                     request["text"],
                     speaker_wav,

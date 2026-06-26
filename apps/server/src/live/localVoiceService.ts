@@ -10,12 +10,13 @@ export interface LocalVoiceServiceConfig {
   pythonBinary: string;
   scriptPath: string;
   whisperModel: string;
-  speakerWav: string;
+  speakerWav?: string | undefined;
   ttsLanguage: string;
   whisperLanguage?: string | undefined;
   whisperInitialPrompt?: string | undefined;
   whisperNoSpeechThreshold?: number | undefined;
   device?: string | undefined;
+  enableLocalTts?: boolean | undefined;
 }
 
 interface PendingRequest {
@@ -45,6 +46,9 @@ export class LocalVoiceService {
   }
 
   async synthesize(text: string, outWav: string, timeoutMs = 300_000) {
+    if (this.config.enableLocalTts === false) {
+      throw new Error('Local XTTS is disabled; configure Fish Audio or enable local TTS');
+    }
     await this.start();
     await this.request({ op: 'tts', text, out: outWav }, timeoutMs);
     return outWav;
@@ -74,14 +78,18 @@ export class LocalVoiceService {
     if (!existsSync(this.config.scriptPath)) {
       throw new Error(`Local voice script not found: ${this.config.scriptPath}`);
     }
-    if (!existsSync(this.config.speakerWav)) {
-      throw new Error(`XTTS speaker reference not found: ${this.config.speakerWav}`);
+    const enableLocalTts = this.config.enableLocalTts !== false;
+    if (enableLocalTts) {
+      if (!this.config.speakerWav || !existsSync(this.config.speakerWav)) {
+        throw new Error(`XTTS speaker reference not found: ${this.config.speakerWav ?? '(not set)'}`);
+      }
     }
 
     const payload = JSON.stringify({
       whisper_model: this.config.whisperModel,
-      speaker_wav: this.config.speakerWav,
+      speaker_wav: this.config.speakerWav ?? '',
       tts_language: this.config.ttsLanguage,
+      enable_local_tts: enableLocalTts,
       whisper_language: this.config.whisperLanguage ?? null,
       whisper_initial_prompt: this.config.whisperInitialPrompt ?? null,
       whisper_no_speech_threshold: this.config.whisperNoSpeechThreshold ?? 0.35,
@@ -126,7 +134,8 @@ export class LocalVoiceService {
           if (message.type === 'ready') {
             logger.info('Local voice worker ready', {
               device: message.device,
-              whisperModel: message.whisper_model ?? this.config.whisperModel
+              whisperModel: message.whisper_model ?? this.config.whisperModel,
+              ttsProvider: this.config.enableLocalTts === false ? 'fish' : 'xtts'
             });
             rl.on('line', (payload) => this.handleLine(payload));
             resolveReady();

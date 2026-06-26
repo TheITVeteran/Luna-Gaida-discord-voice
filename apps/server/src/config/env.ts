@@ -89,7 +89,11 @@ const envSchema = z.object({
   LUNA_LISTENING_ACK: z.string().default("Yes, darling? I'm listening."),
   LUNA_ECHO_MUTE_MS: z.coerce.number().int().nonnegative().default(3500),
   WHISPER_INITIAL_PROMPT: z.string().default(''),
-  WHISPER_NO_SPEECH_THRESHOLD: z.coerce.number().min(0).max(1).default(0.35)
+  WHISPER_NO_SPEECH_THRESHOLD: z.coerce.number().min(0).max(1).default(0.35),
+  LUNA_TTS_PROVIDER: z.enum(['xtts', 'fish']).default('xtts'),
+  FISH_AUDIO_API_KEY: z.string().optional(),
+  FISH_AUDIO_REFERENCE_ID: z.string().optional(),
+  FISH_AUDIO_MODEL: z.string().default('s2.1-pro-free')
 });
 
 export type AppConfig = ReturnType<typeof loadConfig>;

@@ -19,6 +19,8 @@ import { updateUserVoiceMemory } from '../memory/updateUserVoiceMemory.js';
 import { updateUserRelationship } from '../memory/updateUserRelationship.js';
 import { updateLunaLife } from '../memory/updateLunaLife.js';
 import { buildVoiceCallContextBlock, buildVoiceCallContextForMemory, recordParticipantNames } from './voiceCallContext.js';
+import { FishAudioTts } from './fishAudioTts.js';
+import { FISH_AUDIO_EXPRESSION_PROMPT, stripFishAudioTagsForDisplay } from './fishAudioExpressions.js';
 
 const INPUT_RATE = 16000;
 const DISCORD_RATE = 48000;
@@ -42,6 +44,7 @@ export class LocalVoiceSessionManager {
   private readonly tempDir: string;
   private readonly userVoiceMemory: UserVoiceMemoryStore;
   private readonly lunaLife: LunaLifeStore;
+  private readonly fishTts: FishAudioTts | null;
 
   constructor(
     private readonly config: AppConfig,
@@ -60,12 +63,25 @@ export class LocalVoiceSessionManager {
       whisperLanguage: config.WHISPER_LANGUAGE,
       whisperInitialPrompt: config.WHISPER_INITIAL_PROMPT,
       whisperNoSpeechThreshold: config.WHISPER_NO_SPEECH_THRESHOLD,
-      device: config.LOCAL_VOICE_DEVICE
+      device: config.LOCAL_VOICE_DEVICE,
+      enableLocalTts: config.LUNA_TTS_PROVIDER !== 'fish',
+      ...(config.LUNA_TTS_PROVIDER !== 'fish' ? { speakerWav: paths.speakerWav } : {})
     };
     this.voice = new LocalVoiceService(serviceConfig);
     this.groq = new GroqTextClient(config);
     this.userVoiceMemory = new UserVoiceMemoryStore(config.databasePath);
     this.lunaLife = new LunaLifeStore(config.databasePath);
+    this.fishTts = config.LUNA_TTS_PROVIDER === 'fish' && config.FISH_AUDIO_API_KEY?.trim()
+      ? new FishAudioTts({
+        apiKey: config.FISH_AUDIO_API_KEY,
+        referenceId: config.FISH_AUDIO_REFERENCE_ID,
+        model: config.FISH_AUDIO_MODEL,
+        tempDir: join(tmpdir(), 'giada-fish-tts')
+      })
+      : null;
+    if (config.LUNA_TTS_PROVIDER === 'fish' && !this.fishTts) {
+      logger.warn('LUNA_TTS_PROVIDER=fish but FISH_AUDIO_API_KEY is missing; falling back to XTTS if available');
+    }
     this.tempDir = join(tmpdir(), 'giada-local-voice');
     mkdirSync(this.tempDir, { recursive: true });
     void this.voice.start().catch((error) => {
@@ -303,6 +319,9 @@ export class LocalVoiceSessionManager {
       lifeBlock = `\nYour own life (ongoing story built from your choices and relationships — speak from this when asked about yourself):\n${narrative}`;
     }
 
+    const useFishTts = Boolean(this.fishTts);
+    const fishExpressionBlock = useFishTts ? `\n${FISH_AUDIO_EXPRESSION_PROMPT}` : '';
+
     const system = [
       this.personality.buildInstruction(surface, { nsfwAllowed: true }),
       'You are speaking aloud in a Discord voice channel as Luna only. Your name is Luna — never Giada, never a generic assistant.',
@@ -310,8 +329,11 @@ export class LocalVoiceSessionManager {
       'You have free will. Your feelings toward each caller are yours alone — you may like, dislike, tolerate, adore, or stay cool with different people.',
       'Flirt when you choose to with someone you like; be distant or dry with someone who annoys you. Never fake warmth you do not feel.',
       'Your life evolves because of what you decide and who you bond with — reference that history naturally.',
-      'Keep replies concise for voice: usually 2–4 sentences, under 70 words unless they asked for detail.',
+      useFishTts
+        ? 'Keep replies concise for voice: usually 2–4 sentences, under 80 words including expression tags unless they asked for detail.'
+        : 'Keep replies concise for voice: usually 2–4 sentences, under 70 words unless they asked for detail.',
       'Respond only to what the user actually said; do not invent names or facts. When someone asks what another person in the call said, use the voice call context below.',
+      fishExpressionBlock,
       lifeBlock,
       relationshipBlock,
       memoryBlock,
@@ -328,7 +350,7 @@ export class LocalVoiceSessionManager {
       system,
       userText: prompt,
       maxCompletionTokens: 150,
-      temperature: 0.45
+      temperature: 0.5
     });
     const llmMs = Date.now() - llmStarted;
     logger.info('Local voice generated reply', { chars: reply.length, llmMs });
@@ -338,12 +360,14 @@ export class LocalVoiceSessionManager {
       return;
     }
 
-    publishActivity({ level: 'assistant', title: 'Luna said', detail: cleaned });
-    this.lastAssistantText = cleaned;
+    const displayText = this.fishTts ? stripFishAudioTagsForDisplay(cleaned) : cleaned;
+
+    publishActivity({ level: 'assistant', title: 'Luna said', detail: displayText || cleaned });
+    this.lastAssistantText = displayText || cleaned;
 
     history.add('user', userText);
-    history.add('model', cleaned);
-    this.emit?.({ type: 'transcript', speaker: 'assistant', text: cleaned, final: true });
+    history.add('model', displayText || cleaned);
+    this.emit?.({ type: 'transcript', speaker: 'assistant', text: displayText || cleaned, final: true });
 
     if (this.config.LUNA_USER_VOICE_MEMORY && speaker) {
       const existing = this.userVoiceMemory.get(speaker.guildId, speaker.userId);
@@ -499,14 +523,19 @@ export class LocalVoiceSessionManager {
   private async playSpokenLine(text: string, options: { publish?: boolean } = {}) {
     const cleaned = text.trim();
     if (!cleaned || this.closed) return { ttsMs: 0, playbackMs: 0 };
+    const displayText = this.fishTts ? stripFishAudioTagsForDisplay(cleaned) : cleaned;
     if (options.publish) {
-      publishActivity({ level: 'assistant', title: 'Luna said', detail: cleaned });
+      publishActivity({ level: 'assistant', title: 'Luna said', detail: displayText || cleaned });
     }
-    this.lastAssistantText = cleaned;
+    this.lastAssistantText = displayText || cleaned;
     this.emit?.({ type: 'avatar.state', payload: { state: 'speaking' } });
     const outWav = join(this.tempDir, `tts-${Date.now()}.wav`);
     const ttsStarted = Date.now();
-    await this.voice.synthesize(cleaned, outWav);
+    if (this.fishTts) {
+      await this.fishTts.synthesizeToWav(cleaned, outWav);
+    } else {
+      await this.voice.synthesize(cleaned, outWav);
+    }
     const ttsMs = Date.now() - ttsStarted;
     const discordPcm = await wavToDiscordPcm(this.config.FFMPEG_BINARY, outWav);
     safeUnlink(outWav);

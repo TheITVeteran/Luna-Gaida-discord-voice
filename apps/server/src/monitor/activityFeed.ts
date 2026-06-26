@@ -76,7 +76,8 @@ function mapKnownLog(message: string, meta: Record<string, unknown>) {
     return { level: 'error' as const, title: 'Voice turn failed', detail: String(meta.error ?? 'unknown error') };
   }
   if (message === 'Local voice worker ready') {
-    return { level: 'success' as const, title: 'Voice engine ready', detail: `Whisper + XTTS on ${meta.device ?? 'cpu'}` };
+    const engine = meta.ttsProvider === 'fish' ? 'Fish Audio' : 'XTTS';
+    return { level: 'success' as const, title: 'Voice engine ready', detail: `Whisper + ${engine} on ${meta.device ?? 'cpu'}` };
   }
   if (message === 'Received Discord slash command') {
     const sub = meta.subcommand ? ` /${meta.subcommand}` : '';
