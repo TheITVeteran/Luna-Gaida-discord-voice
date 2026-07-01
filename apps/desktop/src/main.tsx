@@ -5,6 +5,7 @@ import { AvatarStage } from './components/AvatarStage';
 import { Live2DAvatarStage } from './components/Live2DAvatarStage';
 import { ControlPanel } from './components/ControlPanel';
 import { RealtimeClient, type CompanionState, type RealtimeEvent, type TranscriptLine } from './lib/realtime';
+import type { AvatarWardrobePayload } from './lib/tuziAnheiWardrobe';
 import './styles/app.css';
 
 const useLive2D = (import.meta.env.VITE_AVATAR_RENDERER ?? 'live2d') === 'live2d';
@@ -13,7 +14,8 @@ function App() {
   const client = useMemo(() => new RealtimeClient({ audioEnabled: true }), []);
   const [status, setStatus] = useState('offline');
   const [state, setState] = useState<CompanionState>('idle');
-  const [expression, setExpression] = useState('neutral');
+  const [expressionCue, setExpressionCue] = useState({ name: 'neutral', at: 0 });
+  const [wardrobe, setWardrobe] = useState<AvatarWardrobePayload | null>(null);
   const [modelName, setModelName] = useState('AI_Maid');
   const [transcripts, setTranscripts] = useState<TranscriptLine[]>([]);
   const [mic, setMic] = useState(false);
@@ -41,7 +43,12 @@ function App() {
           setStatus('connected');
         }
       } else if (detail.type === 'avatar.expression') {
-        setExpression(detail.payload.expression);
+        setExpressionCue({
+          name: detail.payload.expression,
+          at: detail.payload.at ?? Date.now()
+        });
+      } else if (detail.type === 'avatar.wardrobe') {
+        setWardrobe(detail.payload);
       } else if (detail.type === 'avatar.model.change') {
         setModelName(detail.payload.modelName);
       } else if (detail.type === 'transcript') {
@@ -75,9 +82,14 @@ function App() {
     <main className="app-shell">
       <section className="avatar-pane">
         {useLive2D ? (
-          <Live2DAvatarStage state={state} expression={expression} />
+          <Live2DAvatarStage
+            state={state}
+            expression={expressionCue.name}
+            expressionAt={expressionCue.at}
+            wardrobe={wardrobe}
+          />
         ) : (
-          <AvatarStage state={state} expression={expression} modelName={modelName} analyser={client.player.getAnalyser()} />
+          <AvatarStage state={state} expression={expressionCue.name} modelName={modelName} analyser={client.player.getAnalyser()} />
         )}
       </section>
       <ControlPanel

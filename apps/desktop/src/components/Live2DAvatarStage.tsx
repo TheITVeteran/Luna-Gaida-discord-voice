@@ -3,13 +3,17 @@ import { LUNA_NAME } from '../lib/lunaBrand';
 import type { CompanionState } from '../lib/realtime';
 import { Live2DAvatarRuntime, resolveLive2dModelUrl } from '../lib/live2dRuntime';
 
+import type { AvatarWardrobePayload } from '../lib/tuziAnheiWardrobe';
+
 interface Live2DAvatarStageProps {
   state: CompanionState;
   expression: string;
+  expressionAt?: number;
+  wardrobe?: AvatarWardrobePayload | null;
   floating?: boolean;
 }
 
-export function Live2DAvatarStage({ state, expression, floating = false }: Live2DAvatarStageProps) {
+export function Live2DAvatarStage({ state, expression, expressionAt = 0, wardrobe = null, floating = false }: Live2DAvatarStageProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const runtimeRef = useRef<Live2DAvatarRuntime | null>(null);
   const [hint, setHint] = useState(() => resolveLive2dModelUrl() ? '' : 'Set VITE_LIVE2D_MODEL_URL to your .model3.json path');
@@ -35,7 +39,11 @@ export function Live2DAvatarStage({ state, expression, floating = false }: Live2
 
   useEffect(() => {
     runtimeRef.current?.setExpression(expression);
-  }, [expression]);
+  }, [expression, expressionAt]);
+
+  useEffect(() => {
+    if (wardrobe) runtimeRef.current?.setWardrobe(wardrobe);
+  }, [wardrobe]);
 
   return (
     <div className={floating ? 'avatar-stage floating live2d-stage' : 'avatar-stage live2d-stage'}>

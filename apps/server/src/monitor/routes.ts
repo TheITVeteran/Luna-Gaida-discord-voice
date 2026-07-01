@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { listActivity, subscribeActivity, publishActivity } from './activityFeed.js';
+import { setMonitorTtsEnabled } from '../live/lunaTtsOutput.js';
 import type { UserVoiceMemoryStore } from '../memory/userVoiceMemory.js';
 import type { LunaLifeStore } from '../memory/lunaLifeStore.js';
 import { buildCooloffRelationshipNotes } from '../memory/relationshipBond.js';
@@ -209,4 +210,14 @@ export async function registerMonitorRoutes(
       return ptt.stopPtt(userId);
     });
   }
+
+  app.post('/monitor/tts/enable', async () => {
+    setMonitorTtsEnabled(true, 1);
+    publishActivity({
+      level: 'info',
+      title: 'Monitor Luna voice enabled',
+      detail: 'Playback volume 100%'
+    });
+    return { ok: true, volume: 1, volumePercent: 100, textEnabled: true };
+  });
 }

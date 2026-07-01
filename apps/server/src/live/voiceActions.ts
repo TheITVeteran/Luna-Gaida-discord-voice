@@ -1,9 +1,4 @@
-import {
-  stripFishAudioTagsForDisplay,
-  mapActionToFishTags,
-  prepareFishTtsText,
-  type FishTtsEnrichContext
-} from './fishAudioExpressions.js';
+import { mapActionToFishTags, prepareFishTtsText, stripFishAudioTagsForDisplay, type FishTtsEnrichContext } from './fishAudioExpressions.js';
 import { inferDefaultMoodFromReply } from './fishAudioDelivery.js';
 
 const ASTERISK_ACTION = /\*([^*]+)\*/g;
@@ -57,39 +52,37 @@ export function buildFishTtsFromReply(text: string, context: FishTtsEnrichContex
 }
 
 export function mapActionToExpression(action: string): string | null {
-  const native = mapActionToTuziAnheiExpressions(action);
-  if (native.length) return native[0]!;
-
   const key = action.toLowerCase().replace(/[^a-z\s]/g, ' ').replace(/\s+/g, ' ').trim();
   if (!key) return null;
-  if (/\blaugh|\bgiggle|\bchuckle|\bsmile|\bgrin/.test(key)) return 'happy';
-  if (/\bsigh|\bsad|\bcry|\bsob|\bfrown/.test(key)) return 'sad';
-  if (/\bangry|\bglare|\bscowl/.test(key)) return 'angry';
+  if (/\blaugh|\bgiggle|\bchuckle/.test(key)) return 'laugh';
+  if (/\bsmile|\bgrin/.test(key)) return 'happy';
+  if (/\bsigh|\bsad|\bcry|\bsob|\bfrown|\btear/.test(key)) return 'sad';
+  if (/\bangry|\bglare|\bscowl|\bfurious/.test(key)) return 'angry';
   if (/\bsurprise|\bgasp|\bshock/.test(key)) return 'surprised';
   if (/\bblush|\bshy|\bembarrass/.test(key)) return 'shy';
+  if (/\bconfus|\bpuzzle|\bhuh/.test(key)) return 'yihuo';
+  if (/\bsweat|\bnervous|\banxious/.test(key)) return 'hanzhu';
+  if (/\bbreak|\bmeltdown|\bsnap/.test(key)) return 'benghuai';
+  if (/\bheart|\blove|\badore/.test(key)) return 'aixin';
+  if (/\bstar|\bsparkle|\bshine/.test(key)) return 'xingxing';
+  if (/\bblood|\bcreepy|\bscary/.test(key)) return 'xueji';
   if (/\bwink|\bflirt|\btease/.test(key)) return 'happy';
   if (/\bear|\btail|\bperk|\bthump|\bbounce/.test(key)) return 'happy';
   return null;
 }
 
-function mapActionToTuziAnheiExpressions(action: string): string[] {
-  const key = action.toLowerCase().replace(/[^a-z\s]/g, ' ').replace(/\s+/g, ' ').trim();
-  if (!key) return [];
-
-  if (/\blaugh|\bgiggle|\bchuckle|\bsmile|\bgrin/.test(key)) return ['lianhong'];
-  if (/\bsigh|\bsad|\bcry|\bsob|\bfrown|\btear/.test(key)) return ['liulei'];
-  if (/\bangry|\bglare|\bscowl|\bfurious/.test(key)) return ['heilian'];
-  if (/\bsurprise|\bgasp|\bshock/.test(key)) return ['yihuo'];
-  if (/\bblush|\bshy|\bembarrass/.test(key)) return ['lianhong'];
-  if (/\bconfus|\bpuzzle|\bhuh/.test(key)) return ['yihuo'];
-  if (/\bsweat|\bnervous|\banxious/.test(key)) return ['hanzhu'];
-  if (/\bbreak|\bmeltdown|\bsnap/.test(key)) return ['benghuai'];
-  if (/\bheart|\blove|\badore/.test(key)) return ['aixin'];
-  if (/\bstar|\bsparkle|\bshine/.test(key)) return ['xingxing'];
-  if (/\bblood|\bcreepy|\bscary/.test(key)) return ['xueji'];
-  if (/\bear|\btail|\bperk|\bbounce/.test(key)) return ['xingxing'];
-
-  return [];
+export function avatarExpressionFromReply(text: string, actions: string[]) {
+  for (const action of actions) {
+    const mapped = mapActionToExpression(action);
+    if (mapped) return mapped;
+  }
+  const plain = text.toLowerCase();
+  if (/\b(lol|haha|hehe|funny|laugh)/.test(plain)) return 'laugh';
+  if (/\b(sorry|sad|miss you|heartbroken|cry|tears)\b/.test(plain)) return 'sad';
+  if (/\b(angry|furious|hate you|damn|shut up)\b/.test(plain)) return 'angry';
+  if (/\b(wow|really\?|no way|what\?!)\b/.test(plain)) return 'surprised';
+  if (/\b(cute|blush|darling|love you|adorable)\b/.test(plain)) return 'shy';
+  return null;
 }
 
 export function shouldReactWithMotion(action: string) {

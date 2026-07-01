@@ -25,7 +25,8 @@ import { buildVoiceCallContextBlock, buildVoiceCallContextForMemory, recordParti
 import { FishAudioTts } from './fishAudioTts.js';
 import { FISH_AUDIO_EXPRESSION_PROMPT, stripFishAudioTagsForDisplay } from './fishAudioExpressions.js';
 import { analyzeFishTtsDelivery, buildFishDeliveryContext } from './fishAudioDelivery.js';
-import { applyVoiceActionsToReply, mapActionToExpression, shouldReactWithMotion, stripRoleplayMarkupForSpeech } from './voiceActions.js';
+import { avatarExpressionPayload } from './avatarExpressions.js';
+import { applyVoiceActionsToReply, avatarExpressionFromReply, mapActionToExpression, shouldReactWithMotion, stripRoleplayMarkupForSpeech } from './voiceActions.js';
 import {
   buildAvatarAwarenessPromptBlock,
   resolveAvatarWardrobe,
@@ -633,7 +634,7 @@ export class LocalVoiceSessionManager {
       actions,
       replyText: spokenForUi || cleaned
     });
-    this.emitVoiceActions(actions);
+    this.emitVoiceActions(actions, spokenForUi || cleaned);
     if (ttsText) {
       const playOptions = spokenForUi
         ? { displayText: spokenForUi, relationship: options.relationship ?? null }
@@ -1218,15 +1219,23 @@ export class LocalVoiceSessionManager {
     });
   }
 
-  private emitVoiceActions(actions: string[]) {
-    if (!actions.length || this.closed) return;
+  private emitVoiceActions(actions: string[], replyText = '') {
+    if (this.closed) return;
+    const seen = new Set<string>();
     for (const action of actions) {
       if (shouldReactWithMotion(action)) {
         this.emit?.({ type: 'avatar.state', payload: { state: 'reacting' } });
       }
       const expression = mapActionToExpression(action);
-      if (expression) {
-        this.emit?.({ type: 'avatar.expression', payload: { expression, intensity: 1 } });
+      if (expression && !seen.has(expression)) {
+        seen.add(expression);
+        this.emit?.({ type: 'avatar.expression', payload: avatarExpressionPayload(expression, 1) });
+      }
+    }
+    if (!seen.size && replyText.trim()) {
+      const inferred = avatarExpressionFromReply(replyText, actions);
+      if (inferred) {
+        this.emit?.({ type: 'avatar.expression', payload: avatarExpressionPayload(inferred, 0.85) });
       }
     }
   }
@@ -1275,7 +1284,7 @@ export class LocalVoiceSessionManager {
     const ttsMs = Date.now() - ttsStarted;
     const discordPcm = await wavToDiscordPcm(this.config.FFMPEG_BINARY, outWav);
     safeUnlink(outWav);
-    publishLunaTtsAvatarSync(discordPcm, displayText || speechText);
+    publishLunaTtsAvatarSync(discordPcm, displayText || speechText, { includeTranscript: false });
     broadcastLunaTtsAudio(discordPcm);
     emitLunaTtsAudio(discordPcm, this.closed ? null : this.emit);
     const playbackMs = lunaTtsPlaybackMs(discordPcm);

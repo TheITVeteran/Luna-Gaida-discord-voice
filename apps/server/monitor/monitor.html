@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="dark" />
   <meta name="theme-color" content="#020810" />
   <title>Luna Live Monitor</title>
-  <link rel="stylesheet" href="/monitor/style.css?v=8" />
+  <link rel="stylesheet" href="/monitor/style.css?v=9" />
 </head>
 <body>
   <header>
@@ -22,8 +22,11 @@
       <div id="voice-diag" class="stat"><strong>Last heard:</strong> —</div>
       <div id="voice-out" class="stat"><strong>Last spoke:</strong> —</div>
       <div id="last-error" class="stat"><strong>Last error:</strong> none</div>
-      <button id="tts-btn" type="button" class="tts-btn">Enable Luna voice</button>
-      <div id="tts-hint">Click once so this page can play TTS (for OBS browser capture). Lip sync stays on the Fluffy window.</div>
+      <button id="tts-btn" type="button" class="tts-btn">Enable Luna voice + text</button>
+      <div id="tts-hint">Click once so this page can play TTS and show Luna's replies as text (for OBS browser capture). Lip sync stays on the Fluffy window.</div>
+      <div id="luna-conversation" class="luna-conversation hidden" aria-live="polite">
+        <div class="luna-conversation-empty">Luna's replies will appear here…</div>
+      </div>
       <button id="ptt-btn" type="button" disabled>Hold to Talk</button>
       <div id="ptt-hint">Join voice with Luna first. Hold this button while speaking, then release to send.</div>
     </section>
@@ -41,6 +44,6 @@
       <div id="feed"><div class="empty">Waiting for events…</div></div>
     </section>
   </main>
-  <script src="/monitor/app.js?v=8"></script>
+  <script src="/monitor/app.js?v=9"></script>
 </body>
 </html>

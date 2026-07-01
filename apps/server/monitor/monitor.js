@@ -4,7 +4,9 @@ const lifePanel = document.getElementById('life-panel');
 const connection = document.getElementById('connection');
 const pttBtn = document.getElementById('ptt-btn');
 const ttsBtn = document.getElementById('tts-btn');
+const lunaConversation = document.getElementById('luna-conversation');
 const events = new Map();
+const conversationLines = [];
 let pttAvailable = false;
 let voiceAttached = false;
 let recording = false;
@@ -17,6 +19,7 @@ class LunaMonitorAudio {
     this.nextPlayTime = 0;
     this.generation = 0;
     this.queue = Promise.resolve();
+    this.playbackGain = 1;
   }
 
   async unlock() {
@@ -61,6 +64,7 @@ class LunaMonitorAudio {
     const gain = this.context.createGain();
     source.buffer = audioBuffer;
     source.connect(gain);
+    gain.gain.value = this.playbackGain;
     gain.connect(this.context.destination);
 
     const scheduled = Math.max(this.context.currentTime, this.nextPlayTime);
@@ -93,8 +97,13 @@ function connectTtsStream() {
     } catch {
       return;
     }
-    if (event.type === 'audio' && ttsEnabled) {
+    if (!ttsEnabled) return;
+    if (event.type === 'audio') {
       void monitorAudio.enqueueBase64Pcm(event.data);
+      return;
+    }
+    if (event.type === 'transcript' && event.text?.trim()) {
+      appendConversationLine(event.speaker === 'user' ? 'user' : 'assistant', event.text.trim());
     }
   });
   ttsSocket.addEventListener('close', () => {
@@ -111,8 +120,18 @@ async function enableTts() {
     ttsBtn.textContent = 'Could not unlock audio — try again';
     return;
   }
+  try {
+    const response = await fetch('/monitor/tts/enable', { method: 'POST' });
+    const payload = await response.json();
+    if (payload?.volume != null) {
+      monitorAudio.playbackGain = payload.volume;
+    }
+  } catch {
+    monitorAudio.playbackGain = 1;
+  }
   ttsEnabled = true;
-  ttsBtn.textContent = 'Luna voice enabled';
+  lunaConversation.classList.remove('hidden');
+  ttsBtn.textContent = 'Luna voice + text enabled (100%)';
   ttsBtn.classList.add('enabled');
   ttsBtn.disabled = true;
   connectTtsStream();
@@ -126,6 +145,43 @@ function formatTime(iso) {
   return new Date(iso).toLocaleTimeString();
 }
 
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;');
+}
+
+function appendConversationLine(speaker, text) {
+  const normalized = text.trim();
+  if (!normalized || !ttsEnabled) return;
+  const last = conversationLines[conversationLines.length - 1];
+  if (last && last.speaker === speaker && last.text === normalized) return;
+
+  conversationLines.push({
+    speaker,
+    text: normalized,
+    time: new Date().toISOString()
+  });
+  if (conversationLines.length > 40) conversationLines.splice(0, conversationLines.length - 40);
+  renderConversation();
+}
+
+function renderConversation() {
+  if (!conversationLines.length) {
+    lunaConversation.innerHTML = '<div class="luna-conversation-empty">Luna\'s replies will appear here…</div>';
+    return;
+  }
+  lunaConversation.innerHTML = conversationLines.map((line) => `
+    <article class="luna-line ${line.speaker}">
+      <time>${formatTime(line.time)}</time>
+      <span class="speaker">${line.speaker === 'user' ? 'You' : 'Luna'}</span>
+      <div class="text">${escapeHtml(line.text)}</div>
+    </article>
+  `).join('');
+  lunaConversation.scrollTop = lunaConversation.scrollHeight;
+}
+
 function renderEvent(event) {
   events.set(event.id, event);
   const sorted = [...events.values()].sort((a, b) => b.id - a.id).slice(0, 80);
@@ -136,13 +192,14 @@ function renderEvent(event) {
       ${item.detail ? `<div class="detail">${escapeHtml(item.detail)}</div>` : ''}
     </article>
   `).join('');
-}
 
-function escapeHtml(value) {
-  return String(value)
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;');
+  if (ttsEnabled && event.detail?.trim()) {
+    if (event.title === 'You said') {
+      appendConversationLine('user', event.detail.replace(/ \(\d+(?:\.\d+)?s audio\)$/, ''));
+    } else if (event.title === 'Luna said') {
+      appendConversationLine('assistant', event.detail);
+    }
+  }
 }
 
 function setRecording(active) {

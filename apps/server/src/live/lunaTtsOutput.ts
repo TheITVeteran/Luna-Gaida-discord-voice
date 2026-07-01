@@ -38,12 +38,16 @@ export function pcmDurationMs(pcm: Buffer, sampleRate: number, channels: number)
   return bytesPerSecond > 0 ? Math.round((pcm.length / bytesPerSecond) * 1000) : 0;
 }
 
-export function publishLunaTtsAvatarSync(discordPcm: Buffer, displayText: string) {
+export function publishLunaTtsAvatarSync(
+  discordPcm: Buffer,
+  displayText: string,
+  options?: { includeTranscript?: boolean }
+) {
   if (!discordPcm.length) return;
   const frameMs = 50;
   const open = buildLipSyncFrames(discordPcm, LUNA_DISCORD_RATE, LUNA_DISCORD_CHANNELS, frameMs);
   broadcastAvatarEvent({ type: 'avatar.lipsync', payload: { frameMs, open } });
-  if (displayText.trim()) {
+  if (options?.includeTranscript !== false && displayText.trim()) {
     broadcastAvatarEvent({
       type: 'transcript',
       speaker: 'assistant',
@@ -67,6 +71,34 @@ export function emitLunaTtsAudio(
 }
 
 let discordVoiceBridgeCount = 0;
+let monitorTtsEnabled = false;
+let monitorTtsVolume = 1;
+
+export function setMonitorTtsEnabled(enabled: boolean, volume = 1) {
+  monitorTtsEnabled = enabled;
+  monitorTtsVolume = Math.min(4, Math.max(0.1, volume));
+}
+
+export function isMonitorTtsEnabled() {
+  return monitorTtsEnabled;
+}
+
+export function getMonitorTtsVolume() {
+  return monitorTtsVolume;
+}
+
+function clampInt16(value: number) {
+  return Math.max(-32_768, Math.min(32_767, value));
+}
+
+function scaleDiscordPcm(pcm: Buffer, gain: number) {
+  if (gain === 1) return pcm;
+  const out = Buffer.allocUnsafe(pcm.length);
+  for (let offset = 0; offset < pcm.length; offset += 2) {
+    out.writeInt16LE(clampInt16(Math.round(pcm.readInt16LE(offset) * gain)), offset);
+  }
+  return out;
+}
 
 export function isLunaElectronAudioMuted() {
   return discordVoiceBridgeCount > 0;
@@ -92,10 +124,15 @@ export function setDiscordVoiceBridgeActive(active: boolean) {
 }
 
 export function broadcastLunaTtsAudio(discordPcm: Buffer) {
-  if (!discordPcm.length || isLunaElectronAudioMuted()) return;
+  if (!discordPcm.length) return;
+  const avatarMuted = isLunaElectronAudioMuted();
+  if (avatarMuted && !monitorTtsEnabled) return;
+  const pcm = monitorTtsEnabled && monitorTtsVolume !== 1
+    ? scaleDiscordPcm(discordPcm, monitorTtsVolume)
+    : discordPcm;
   broadcastAvatarEvent({
     type: 'audio',
-    data: discordPcm.toString('base64'),
+    data: pcm.toString('base64'),
     mimeType: 'audio/pcm;rate=48000;channels=2'
   });
 }

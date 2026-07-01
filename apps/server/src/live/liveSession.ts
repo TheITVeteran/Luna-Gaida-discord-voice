@@ -27,7 +27,7 @@ export type LiveClientEvent =
   | { type: 'response.empty'; reason: string }
   | { type: 'audio'; data: string; mimeType: 'audio/pcm;rate=24000' | 'audio/pcm;rate=48000;channels=2' }
   | { type: 'transcript'; speaker: 'user' | 'assistant'; text: string; final?: boolean }
-  | { type: 'avatar.expression'; payload: { expression: string; intensity: number } }
+  | { type: 'avatar.expression'; payload: { expression: string; intensity: number; at?: number } }
   | { type: 'avatar.wardrobe'; payload: { outfit: 'light' | 'dark'; accessories: string[]; motion?: string | null } }
   | { type: 'avatar.local_audio'; payload: { muted: boolean } }
   | { type: 'avatar.state'; payload: { state: string } }

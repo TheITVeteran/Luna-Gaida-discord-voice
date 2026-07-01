@@ -1160,6 +1160,9 @@ export class DiscordVoiceBridge implements MusicController, VoiceController {
   private handleLiveEvent(event: LiveClientEvent) {
     if (event.type === 'avatar.lipsync') {
       return;
+    } else if (event.type === 'transcript') {
+      broadcastAvatarEvent(event);
+      return;
     } else if (event.type === 'avatar.state' || event.type === 'avatar.expression' || event.type === 'avatar.wardrobe' || event.type === 'avatar.model.change') {
       broadcastAvatarEvent(event);
     }

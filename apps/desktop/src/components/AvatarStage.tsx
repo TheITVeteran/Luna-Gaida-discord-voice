@@ -96,6 +96,8 @@ class AvatarRuntime {
   private frame = 0;
   private blinkCountdown = 2;
   private blinkValue = 0;
+  private faceExpression = 'neutral';
+  private faceIntensity = 0;
   private speechEnergy = 0;
   private lipOh = 0;
   private lipAa = 0;
@@ -161,8 +163,10 @@ class AvatarRuntime {
     this.currentState = state;
   }
 
-  setExpression(_expression: string) {
-    this.clearExpressiveFace();
+  setExpression(expression: string, intensity = 1) {
+    const normalized = String(expression || 'neutral').toLowerCase();
+    this.faceExpression = normalized;
+    this.faceIntensity = normalized === 'neutral' || intensity <= 0 ? 0 : Math.min(1, Math.max(0, intensity));
   }
 
   setAnalyser(analyser: AnalyserNode | null) {
@@ -539,21 +543,65 @@ class AvatarRuntime {
   }
 
   private applyExpressionLayer() {
-    this.clearExpressiveFace();
-  }
-
-  private clearExpressiveFace() {
     const manager = this.currentVrm?.expressionManager;
     if (!manager) {
       return;
     }
 
-    const expressions = ['happy', 'angry', 'sad', 'surprised', 'relaxed'];
-    for (const expression of expressions) {
-      manager.setValue(expression, 0);
+    const presets = ['happy', 'angry', 'sad', 'surprised', 'relaxed'];
+    for (const preset of presets) {
+      manager.setValue(preset, 0);
     }
 
-    manager.setValue(VRMExpressionPresetName.Blink, this.blinkValue);
+    const mapped = mapVrmExpression(this.faceExpression);
+    if (mapped === 'blink') {
+      manager.setValue(VRMExpressionPresetName.Blink, Math.max(this.blinkValue, this.faceIntensity));
+    } else if (mapped && this.faceIntensity > 0) {
+      manager.setValue(mapped, this.faceIntensity);
+      manager.setValue(VRMExpressionPresetName.Blink, this.blinkValue);
+    } else {
+      manager.setValue(VRMExpressionPresetName.Blink, this.blinkValue);
+    }
+  }
+
+  private clearExpressiveFace() {
+    this.faceExpression = 'neutral';
+    this.faceIntensity = 0;
+    this.applyExpressionLayer();
+  }
+}
+
+function mapVrmExpression(expression: string) {
+  switch (expression) {
+    case 'happy':
+    case 'laugh':
+    case 'smile':
+    case 'blush':
+    case 'lianhong':
+    case 'aixin':
+    case 'xingxing':
+      return 'happy';
+    case 'sad':
+    case 'liulei':
+      return 'sad';
+    case 'angry':
+    case 'heilian':
+    case 'hongguang':
+    case 'xueji':
+      return 'angry';
+    case 'surprised':
+    case 'yihuo':
+      return 'surprised';
+    case 'relaxed':
+    case 'hanzhu':
+      return 'relaxed';
+    case 'shy':
+    case 'benghuai':
+      return 'happy';
+    case 'blink':
+      return 'blink';
+    default:
+      return null;
   }
 }
 

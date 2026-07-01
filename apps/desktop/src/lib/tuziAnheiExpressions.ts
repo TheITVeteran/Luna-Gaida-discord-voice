@@ -24,6 +24,7 @@ export type TuziAnheiExpression = keyof typeof TUZI_ANHEI_EXPRESSIONS;
 
 const MOOD_TO_NATIVE: Record<string, TuziAnheiExpression[]> = {
   happy: ['lianhong', 'aixin'],
+  laugh: ['lianhong', 'aixin'],
   sad: ['liulei'],
   angry: ['heilian', 'hongguang'],
   surprised: ['yihuo', 'xingxing'],
@@ -34,7 +35,6 @@ const MOOD_TO_NATIVE: Record<string, TuziAnheiExpression[]> = {
 const ALIASES: Record<string, TuziAnheiExpression> = {
   smile: 'lianhong',
   grin: 'aixin',
-  laugh: 'aixin',
   heart: 'aixin',
   love: 'aixin',
   blush: 'lianhong',

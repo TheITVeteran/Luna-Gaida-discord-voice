@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { AVATAR_EXPRESSION_NAMES, avatarExpressionPayload } from '../live/avatarExpressions.js';
 import type { MemoryStore } from '../memory/types.js';
 import { classifyText } from '../policy/privacy.js';
 import { searchWeb, type SearchProvider } from '../research/webSearch.js';
@@ -43,8 +44,6 @@ export interface ToolRegistryOptions {
 const memoryToolNames = new Set(['writeMemory', 'retrieveMemory']);
 
 const discordDisabledToolNames = new Set([
-  'changeExpression',
-  'setAvatarState',
   'getAvailableModels',
   'changeModel'
 ]);
@@ -61,7 +60,7 @@ const writeMemorySchema = z.object({
 });
 
 const expressionSchema = z.object({
-  expression: z.enum(['neutral', 'happy', 'sad', 'angry', 'surprised', 'relaxed', 'blink']),
+  expression: z.enum(AVATAR_EXPRESSION_NAMES),
   intensity: z.number().min(0).max(1).default(1)
 });
 
@@ -181,20 +180,21 @@ export function createToolRegistry(options: ToolRegistryOptions = {}): Registere
     {
       declaration: {
         name: 'changeExpression',
-        description: 'Facial expression changes are disabled; this safely neutralizes old expression requests.',
+        description: 'Change Luna avatar facial expression (Live2D overlays or VRM mood presets). Use moods like happy, sad, laugh, shy, or native overlays like lianhong, aixin, liulei.',
         parameters: {
           type: 'OBJECT',
           properties: {
-            expression: { type: 'STRING', enum: ['neutral', 'happy', 'sad', 'angry', 'surprised', 'relaxed', 'blink'] },
-            intensity: { type: 'NUMBER' }
+            expression: { type: 'STRING', enum: [...AVATAR_EXPRESSION_NAMES] },
+            intensity: { type: 'NUMBER', description: '0 to 1 strength. Use 0 or neutral to reset.' }
           },
           required: ['expression']
         }
       },
       async run(args, context) {
-        expressionSchema.parse(args);
-        context.emitClientEvent?.({ type: 'avatar.expression', payload: { expression: 'neutral', intensity: 0 } });
-        return { ok: true, ignored: true, reason: 'expressive_face_disabled' };
+        const parsed = expressionSchema.parse(args);
+        const payload = avatarExpressionPayload(parsed.expression, parsed.intensity);
+        context.emitClientEvent?.({ type: 'avatar.expression', payload });
+        return { ok: true, expression: payload.expression, intensity: payload.intensity };
       }
     },
     {

@@ -16,8 +16,9 @@ export type RealtimeEvent =
   | { type: 'screen.status'; status: 'sharing' | 'stopped' | 'error'; reason?: string }
   | { type: 'audio'; data: string; mimeType: string }
   | { type: 'transcript'; speaker: 'user' | 'assistant'; text: string; final?: boolean }
-  | { type: 'avatar.expression'; payload: { expression: string; intensity: number } }
+  | { type: 'avatar.expression'; payload: { expression: string; intensity: number; at?: number } }
   | { type: 'avatar.state'; payload: { state: CompanionState } }
+  | { type: 'avatar.wardrobe'; payload: { outfit: 'light' | 'dark'; accessories: string[]; motion?: string | null } }
   | { type: 'avatar.model.change'; payload: { modelName: string } };
 
 export class RealtimeClient extends EventTarget {
@@ -34,11 +35,13 @@ export class RealtimeClient extends EventTarget {
   private screenSharing = false;
   private readonly audioEnabled: boolean;
   private readonly surface: 'app' | 'browser';
+  private readonly role?: 'avatar' | 'monitor' | 'live';
 
-  constructor(options: { audioEnabled?: boolean; surface?: 'app' | 'browser' } = {}) {
+  constructor(options: { audioEnabled?: boolean; surface?: 'app' | 'browser'; role?: 'avatar' | 'monitor' | 'live' } = {}) {
     super();
     this.audioEnabled = options.audioEnabled ?? true;
     this.surface = options.surface ?? ('__TAURI_INTERNALS__' in window ? 'app' : 'browser');
+    this.role = options.role;
   }
 
   connect(): Promise<void> {
@@ -65,7 +68,11 @@ export class RealtimeClient extends EventTarget {
       const handleOpen = () => {
         cleanup();
         this.connecting = null;
-        this.send({ type: 'connect', surface: this.surface });
+        this.send({
+          type: 'connect',
+          surface: this.surface,
+          ...(this.role ? { role: this.role } : {})
+        });
         if (this.screenSharing) {
           this.send({ type: 'screen.start' });
         }
