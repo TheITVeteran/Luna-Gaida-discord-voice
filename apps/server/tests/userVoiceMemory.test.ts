@@ -23,6 +23,23 @@ describe('UserVoiceMemoryStore reset feelings', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  it('saveConcepts persists theme bullets separately from facts', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'luna-mem-'));
+    const dbPath = join(dir, 'test.sqlite');
+    const store = new UserVoiceMemoryStore(dbPath);
+
+    store.save('g1', 'u1', 'Alex', '- builds AI projects');
+    store.saveConcepts('g1', 'u1', 'Alex', '- fine-tuning Luna voice\n- discord music testing');
+
+    const record = store.get('g1', 'u1');
+    expect(record?.summary).toMatch(/AI projects/i);
+    expect(record?.concepts).toMatch(/fine-tuning/i);
+    expect(record?.concepts).toMatch(/music testing/i);
+
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   it('deleteCaller removes all saved notes for a user', () => {
     const dir = mkdtempSync(join(tmpdir(), 'luna-mem-'));
     const dbPath = join(dir, 'test.sqlite');

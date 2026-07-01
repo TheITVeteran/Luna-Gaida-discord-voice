@@ -11,6 +11,7 @@ import { logger } from '../logging/logger.js';
 import { assertDiscordSafe } from '../policy/privacy.js';
 import { stripRoleplayMarkupForSpeech } from './voiceActions.js';
 import { buildLunaDmVoiceAttachment } from './lunaDmTts.js';
+import { ensureOllamaReady } from '../providers/ollamaHealth.js';
 import {
   buildLunaDmPrompt,
   LUNA_DM_JSON_SCHEMA,
@@ -81,6 +82,11 @@ export class LunaDmInitiativeService {
       const candidates = await this.collectCandidates(client);
       if (!candidates.length) {
         logger.debug('Luna DM initiative: no eligible candidates');
+        return;
+      }
+
+      if (!(await ensureOllamaReady(this.config, { maxWaitMs: 20_000 }))) {
+        logger.debug('Luna DM initiative skipped: Ollama not reachable');
         return;
       }
 

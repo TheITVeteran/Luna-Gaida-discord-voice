@@ -237,6 +237,7 @@ function renderMemory(users) {
       </div>
       <time>Updated ${formatTime(user.updatedAt)}</time>
       ${user.relationship?.trim() ? `<div class="memory-relationship"><strong>How Luna feels</strong><pre>${escapeHtml(user.relationship)}</pre></div>` : ''}
+      ${user.concepts?.trim() ? `<div class="memory-concepts"><strong>Concepts</strong><pre>${escapeHtml(user.concepts)}</pre></div>` : ''}
       ${user.summary?.trim() ? `<div class="memory-facts"><strong>Facts</strong><pre>${escapeHtml(user.summary)}</pre></div>` : ''}
     </article>
   `).join('');

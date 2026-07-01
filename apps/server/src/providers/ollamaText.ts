@@ -1,5 +1,6 @@
 import type { AppConfig } from '../config/env.js';
 import { stripModelArtifacts } from '../live/voiceReply.js';
+import { ensureOllamaReady, formatOllamaFetchError } from './ollamaHealth.js';
 
 interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
@@ -48,6 +49,8 @@ export class OllamaTextClient {
         }
       }),
       signal: AbortSignal.timeout(this.config.ollamaTimeoutMs)
+    }).catch((error) => {
+      throw new Error(formatOllamaFetchError(error, this.config.ollamaApiUrl));
     });
 
     const raw = await response.text();
@@ -140,6 +143,10 @@ export class OllamaTextClient {
     maxCompletionTokens?: number;
     temperature?: number;
   }) {
+    if (!(await ensureOllamaReady(this.config, { maxWaitMs: 20_000 }))) {
+      throw new Error(formatOllamaFetchError(new Error('fetch failed'), this.config.ollamaApiUrl));
+    }
+
     const schemaHint = describeJsonFormat(input.format);
     const system = [
       input.system,
@@ -188,6 +195,8 @@ export class OllamaTextClient {
         }
       }),
       signal: AbortSignal.timeout(this.config.ollamaTimeoutMs)
+    }).catch((error) => {
+      throw new Error(formatOllamaFetchError(error, this.config.ollamaApiUrl));
     });
 
     const raw = await response.text();

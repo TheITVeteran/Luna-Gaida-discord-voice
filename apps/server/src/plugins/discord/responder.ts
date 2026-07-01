@@ -1421,7 +1421,7 @@ function shouldStaySilent(text: string) {
 function isToolEnabledForPlan(name: string, features?: PlanFeatures) {
   if (!features) return true;
   if (name === 'searchWeb') return features.webSearch;
-  if (['playSong', 'pauseMusic', 'resumeMusic', 'stopMusic', 'nextMusic', 'previousMusic', 'seekMusic', 'setMusicVolume', 'setMusicLoop', 'getMusicStatus'].includes(name)) return features.music;
+  if (['playSong', 'pauseMusic', 'resumeMusic', 'stopMusic', 'skipMusic', 'nextMusic', 'previousMusic', 'seekMusic', 'setMusicVolume', 'setMusicLoop', 'getMusicStatus'].includes(name)) return features.music;
   if (name === 'joinRequesterVoiceChannel' || name === 'leaveVoiceChannel') return features.geminiVoice;
   return true;
 }

@@ -130,6 +130,14 @@ const playCommand = new SlashCommandBuilder()
     .setDescription('Song name or YouTube URL')
     .setRequired(true));
 
+const skipCommand = new SlashCommandBuilder()
+  .setName('skip')
+  .setDescription('Skip the current song and play the next one in the queue.');
+
+const stopCommand = new SlashCommandBuilder()
+  .setName('stop')
+  .setDescription('Stop music playback and clear the queue.');
+
 type DiscordRegisteredCommand = {
   id: string;
   name: string;
@@ -595,6 +603,30 @@ export class DiscordPlugin implements GiadaPlugin {
       return;
     }
 
+    if (payload.data?.name === 'skip') {
+      writeJson(res, 200, { type: InteractionResponseType.DeferredChannelMessageWithSource });
+      void this.handleHttpSkipCommand(payload).catch(async (error) => {
+        logger.error('Discord HTTP skip command failed', {
+          id: payload.id,
+          error: error instanceof Error ? error.message : String(error)
+        });
+        await this.updateHttpInteraction(payload, `Discord command error: ${error instanceof Error ? error.message : String(error)}`);
+      });
+      return;
+    }
+
+    if (payload.data?.name === 'stop') {
+      writeJson(res, 200, { type: InteractionResponseType.DeferredChannelMessageWithSource });
+      void this.handleHttpStopCommand(payload).catch(async (error) => {
+        logger.error('Discord HTTP stop command failed', {
+          id: payload.id,
+          error: error instanceof Error ? error.message : String(error)
+        });
+        await this.updateHttpInteraction(payload, `Discord command error: ${error instanceof Error ? error.message : String(error)}`);
+      });
+      return;
+    }
+
     if (payload.data?.name !== 'giada') {
       writeJson(res, 200, {
         type: InteractionResponseType.ChannelMessageWithSource,
@@ -903,6 +935,14 @@ export class DiscordPlugin implements GiadaPlugin {
       await this.handlePlayInteraction(interaction);
       return;
     }
+    if (interaction.commandName === 'skip') {
+      await this.handleSkipInteraction(interaction);
+      return;
+    }
+    if (interaction.commandName === 'stop') {
+      await this.handleStopInteraction(interaction);
+      return;
+    }
     if (interaction.commandName !== 'giada') {
       return;
     }
@@ -1104,6 +1144,66 @@ export class DiscordPlugin implements GiadaPlugin {
 
     await this.replyInteraction(interaction, `Now playing **${title}**.`);
     publishActivity({ level: 'success', title: 'Music playing', detail: title });
+  }
+
+  private async handleSkipInteraction(interaction: ChatInputCommandInteraction) {
+    if (!interaction.guildId) {
+      await interaction.reply({ content: 'Use `/skip` inside a Discord server.', allowedMentions: { parse: [] } });
+      return;
+    }
+    try {
+      await interaction.deferReply();
+    } catch {
+      return;
+    }
+    const bridge = await this.resolveMusicBridge(interaction.guildId, interaction.user.id);
+    if (!bridge.ok) {
+      await this.replyInteraction(interaction, bridge.message);
+      return;
+    }
+    const result = await bridge.bridge.skipMusic();
+    if (!result.ok) {
+      const error = typeof result.error === 'string' ? result.error : 'skip_failed';
+      await this.replyInteraction(interaction, error === 'music_not_playing' ? 'Nothing is playing right now.' : `Could not skip: ${error}`);
+      return;
+    }
+    if (result.state === 'idle') {
+      await this.replyInteraction(interaction, 'Skipped. The queue is empty.');
+      return;
+    }
+    const title = typeof result.title === 'string' ? result.title : 'the next track';
+    await this.replyInteraction(interaction, `Skipped. Now playing **${title}**.`);
+  }
+
+  private async handleStopInteraction(interaction: ChatInputCommandInteraction) {
+    if (!interaction.guildId) {
+      await interaction.reply({ content: 'Use `/stop` inside a Discord server.', allowedMentions: { parse: [] } });
+      return;
+    }
+    try {
+      await interaction.deferReply();
+    } catch {
+      return;
+    }
+    const bridge = await this.resolveMusicBridge(interaction.guildId, interaction.user.id);
+    if (!bridge.ok) {
+      await this.replyInteraction(interaction, bridge.message);
+      return;
+    }
+    const result = await bridge.bridge.stopMusic();
+    await this.replyInteraction(interaction, result.stopped ? 'Music stopped and queue cleared.' : 'Nothing was playing.');
+  }
+
+  private async resolveMusicBridge(guildId: string, userId: string) {
+    const voiceChannelId = await this.resolveRequesterVoiceChannelId(guildId, userId);
+    if (!voiceChannelId) {
+      return { ok: false as const, message: 'Join a voice channel first.' };
+    }
+    const bridge = this.voiceBridges.get(voiceBridgeKey(guildId, voiceChannelId));
+    if (!bridge) {
+      return { ok: false as const, message: 'Luna is not connected to your voice channel. Run `/play` first.' };
+    }
+    return { ok: true as const, bridge };
   }
 
   private async handleHttpGiadaCommand(payload: DiscordHttpInteraction) {
@@ -1370,6 +1470,54 @@ export class DiscordPlugin implements GiadaPlugin {
     }
 
     await this.updateHttpInteraction(payload, `Now playing **${title}**.`);
+  }
+
+  private async handleHttpSkipCommand(payload: DiscordHttpInteraction) {
+    if (!payload.guild_id) {
+      await this.updateHttpInteraction(payload, 'Use `/skip` inside a Discord server.');
+      return;
+    }
+    const userId = payload.member?.user?.id ?? payload.user?.id;
+    if (!userId) {
+      await this.updateHttpInteraction(payload, 'Could not identify who ran `/skip`.');
+      return;
+    }
+    const bridge = await this.resolveMusicBridge(payload.guild_id, userId);
+    if (!bridge.ok) {
+      await this.updateHttpInteraction(payload, bridge.message);
+      return;
+    }
+    const result = await bridge.bridge.skipMusic();
+    if (!result.ok) {
+      const error = typeof result.error === 'string' ? result.error : 'skip_failed';
+      await this.updateHttpInteraction(payload, error === 'music_not_playing' ? 'Nothing is playing right now.' : `Could not skip: ${error}`);
+      return;
+    }
+    if (result.state === 'idle') {
+      await this.updateHttpInteraction(payload, 'Skipped. The queue is empty.');
+      return;
+    }
+    const title = typeof result.title === 'string' ? result.title : 'the next track';
+    await this.updateHttpInteraction(payload, `Skipped. Now playing **${title}**.`);
+  }
+
+  private async handleHttpStopCommand(payload: DiscordHttpInteraction) {
+    if (!payload.guild_id) {
+      await this.updateHttpInteraction(payload, 'Use `/stop` inside a Discord server.');
+      return;
+    }
+    const userId = payload.member?.user?.id ?? payload.user?.id;
+    if (!userId) {
+      await this.updateHttpInteraction(payload, 'Could not identify who ran `/stop`.');
+      return;
+    }
+    const bridge = await this.resolveMusicBridge(payload.guild_id, userId);
+    if (!bridge.ok) {
+      await this.updateHttpInteraction(payload, bridge.message);
+      return;
+    }
+    const result = await bridge.bridge.stopMusic();
+    await this.updateHttpInteraction(payload, result.stopped ? 'Music stopped and queue cleared.' : 'Nothing was playing.');
   }
 
   private async joinRequesterVoiceFromText(guildId: string, userId: string) {
@@ -2469,6 +2617,8 @@ export class DiscordPlugin implements GiadaPlugin {
   private helpText() {
     return [
       '`/play query:<song or YouTube link>` - join your voice channel and play music via yt-dlp.',
+      '`/skip` - skip the current song.',
+      '`/stop` - stop music and clear the queue.',
       '`/giada listen mode:here` - watch this text channel and reply when it makes sense.',
       '`/giada listen mode:off` - stop watching this text channel.',
       '`/giada voice mode:watch` - watch your current voice channel and auto-join when people enter. One voice channel can be active per server.',
@@ -2795,7 +2945,7 @@ export async function registerDiscordCommands(config: AppConfig, activeApplicati
   }
 
   const rest = new REST({ version: '10' }).setToken(registrationToken);
-  const commands = [giadaCommand.toJSON(), playCommand.toJSON()];
+  const commands = [giadaCommand.toJSON(), playCommand.toJSON(), skipCommand.toJSON(), stopCommand.toJSON()];
   const targetGuildIds = config.DISCORD_GUILD_ID
     ? [config.DISCORD_GUILD_ID]
     : [...new Set(guildIds)];

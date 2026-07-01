@@ -88,6 +88,7 @@ export async function registerMonitorRoutes(
       guildId: record.guildId,
       summary: record.summary,
       relationship: record.relationship,
+      concepts: record.concepts,
       updatedAt: record.updatedAt
     })) ?? [],
     lunaLife: lunaLife?.listAll(5).map((record) => ({
@@ -104,6 +105,7 @@ export async function registerMonitorRoutes(
       guildId: record.guildId,
       summary: record.summary,
       relationship: record.relationship,
+      concepts: record.concepts,
       updatedAt: record.updatedAt
     })) ?? []
   }));

@@ -10,6 +10,7 @@ export interface VoiceUserMemory {
   displayName: string | null;
   summary: string;
   relationship: string;
+  concepts: string;
   updatedAt: string;
 }
 
@@ -19,6 +20,7 @@ interface VoiceUserMemoryRow {
   display_name: string | null;
   summary: string;
   relationship: string;
+  concepts: string;
   updated_at: string;
 }
 
@@ -47,7 +49,15 @@ export class UserVoiceMemoryStore {
         ON luna_voice_user_memory(guild_id, updated_at DESC);
     `);
     this.ensureRelationshipColumn();
+    this.ensureConceptsColumn();
     this.importLegacyRowsIfEmpty();
+  }
+
+  private ensureConceptsColumn() {
+    const columns = this.db.prepare('PRAGMA table_info(luna_voice_user_memory)').all() as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === 'concepts')) {
+      this.db.exec(`ALTER TABLE luna_voice_user_memory ADD COLUMN concepts TEXT NOT NULL DEFAULT ''`);
+    }
   }
 
   private ensureRelationshipColumn() {
@@ -97,7 +107,7 @@ export class UserVoiceMemoryStore {
 
   get(guildId: string, userId: string): VoiceUserMemory | null {
     const row = this.db.prepare(`
-      SELECT guild_id, user_id, display_name, summary, relationship, updated_at
+      SELECT guild_id, user_id, display_name, summary, relationship, concepts, updated_at
       FROM luna_voice_user_memory
       WHERE guild_id = ? AND user_id = ?
     `).get(guildId, userId) as VoiceUserMemoryRow | undefined;
@@ -144,9 +154,29 @@ export class UserVoiceMemoryStore {
     return normalized;
   }
 
+  saveConcepts(guildId: string, userId: string, displayName: string | null, concepts: string) {
+    const normalized = normalizeBulletSummary(concepts, 6, 12);
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO luna_voice_user_memory (guild_id, user_id, display_name, summary, relationship, concepts, updated_at)
+      VALUES (@guildId, @userId, @displayName, '', '', @concepts, @updatedAt)
+      ON CONFLICT(guild_id, user_id) DO UPDATE SET
+        display_name = excluded.display_name,
+        concepts = excluded.concepts,
+        updated_at = excluded.updated_at
+    `).run({
+      guildId,
+      userId,
+      displayName,
+      concepts: normalized,
+      updatedAt: now
+    });
+    return normalized;
+  }
+
   listForGuild(guildId: string, limit = 50): VoiceUserMemory[] {
     const rows = this.db.prepare(`
-      SELECT guild_id, user_id, display_name, summary, relationship, updated_at
+      SELECT guild_id, user_id, display_name, summary, relationship, concepts, updated_at
       FROM luna_voice_user_memory
       WHERE guild_id = ?
       ORDER BY updated_at DESC
@@ -157,7 +187,7 @@ export class UserVoiceMemoryStore {
 
   listAll(limit = 100): VoiceUserMemory[] {
     const rows = this.db.prepare(`
-      SELECT guild_id, user_id, display_name, summary, relationship, updated_at
+      SELECT guild_id, user_id, display_name, summary, relationship, concepts, updated_at
       FROM luna_voice_user_memory
       ORDER BY updated_at DESC
       LIMIT ?
@@ -217,6 +247,7 @@ function mapRow(row: VoiceUserMemoryRow): VoiceUserMemory {
     displayName: row.display_name,
     summary: row.summary,
     relationship: row.relationship ?? '',
+    concepts: row.concepts ?? '',
     updatedAt: row.updated_at
   };
 }

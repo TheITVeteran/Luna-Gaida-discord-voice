@@ -12,9 +12,7 @@ import {
   type VoiceConnectionState
 } from '@discordjs/voice';
 import { spawn } from 'node:child_process';
-import { chmodSync, copyFileSync, mkdirSync, readFileSync, statSync, unwatchFile, watchFile } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { readFileSync, statSync, unwatchFile, watchFile } from 'node:fs';
 import { PassThrough, Readable } from 'node:stream';
 import OpusScript from 'opusscript';
 import type { AppConfig } from '../../config/env.js';
@@ -31,6 +29,16 @@ import { logger } from '../../logging/logger.js';
 import { publishActivity } from '../../monitor/activityFeed.js';
 import { broadcastAvatarEvent } from '../../ws/avatarBroadcast.js';
 import { setDiscordVoiceBridgeActive } from '../../live/lunaTtsOutput.js';
+import {
+  downloadYoutubeAudioToTemp,
+  removeTempDir,
+  decodeAudioFileToDiscordPcm,
+} from '../../research/ytDlpSupport.js';
+import {
+  resolveYoutubeTrack,
+  compactYtDlpError,
+  type YoutubeTrack,
+} from '../../research/lunaYoutubeMusic.js';
 
 const DISCORD_RATE = 48000;
 const DISCORD_CHANNELS = 2;
@@ -43,10 +51,6 @@ const MIXER_FRAME_MS = 20;
 const MIXER_FRAME_BYTES = DISCORD_RATE * DISCORD_CHANNELS * 2 * MIXER_FRAME_MS / 1000;
 const MIXER_IDLE_END_MS = 450;
 const ASSISTANT_DUCK_HOLD_MS = 650;
-const MUSIC_QUEUE_HIGH_WATER_BYTES = DISCORD_RATE * DISCORD_CHANNELS * 2 * 12;
-const MUSIC_QUEUE_LOW_WATER_BYTES = DISCORD_RATE * DISCORD_CHANNELS * 2 * 6;
-const YTDLP_SEARCH_RESULTS = 5;
-const YTDLP_AUDIO_FORMAT = 'ba[protocol*=m3u8]/b[protocol*=m3u8]/ba/bestaudio/best';
 
 interface DiscordMusicStatus {
   state: 'idle' | 'searching' | 'playing' | 'paused' | 'stopping' | 'error';
@@ -142,12 +146,14 @@ export class DiscordVoiceBridge implements MusicController, VoiceController {
   private inputQueue: Promise<void> = Promise.resolve();
   private readonly pendingVoiceTextMessages: Array<{ authorName: string; text: string }> = [];
   private voiceTextDrainTimer: ReturnType<typeof setTimeout> | null = null;
-  private musicYtDlp: ReturnType<typeof spawn> | null = null;
-  private musicFfmpeg: ReturnType<typeof spawn> | null = null;
+  private musicPlaybackToken = 0;
+  private musicPlaying = false;
   private musicStopRequested = false;
   private musicStatus: DiscordMusicStatus;
   private readonly musicQueue: DiscordMusicQueueEntry[] = [];
   private readonly musicHistory: YoutubeTrack[] = [];
+  private musicTempDir: string | null = null;
+  private musicLocalPath: string | null = null;
   private destroyed = false;
   private usageReservation: UsageReservation | null = null;
   private usageInputBaseline = 0;
@@ -231,9 +237,6 @@ export class DiscordVoiceBridge implements MusicController, VoiceController {
       },
       onMusicQueueChange: (queuedBytes) => {
         this.musicStatus.queuedBytes = queuedBytes;
-        if (queuedBytes <= MUSIC_QUEUE_LOW_WATER_BYTES && this.musicFfmpeg?.stdout?.isPaused()) {
-          this.musicFfmpeg.stdout.resume();
-        }
       }
     });
     this.voiceChanger = new DiscordVoiceChanger(
@@ -483,7 +486,9 @@ export class DiscordVoiceBridge implements MusicController, VoiceController {
     this.detachConnectionStateHandler();
     this.clearVoiceTextDrainTimer();
     this.pendingVoiceTextMessages.length = 0;
-    this.stopMusicProcesses('destroyed');
+    this.musicPlaybackToken += 1;
+    this.musicPlaying = false;
+    this.cleanupMusicTempDir();
     this.voiceChanger.destroy();
     this.localTtsPlaying = false;
     if (this.live instanceof LocalVoiceSessionManager) {
@@ -1272,6 +1277,69 @@ export class DiscordVoiceBridge implements MusicController, VoiceController {
     });
   }
 
+  /** Play one full music track in a single stream (same path as local TTS). */
+  private playCompleteMusic(pcm: Buffer, track: YoutubeTrack, playbackToken: number): Promise<void> {
+    return new Promise((resolve) => {
+      if (!pcm.length || playbackToken !== this.musicPlaybackToken || this.musicStopRequested) {
+        resolve();
+        return;
+      }
+
+      this.musicPlaying = true;
+      this.mixer.clearMusic();
+
+      const scaledPcm = applyPcmVolume(pcm, this.musicStatus.volume);
+      const durationMs = pcmDurationMs(scaledPcm, DISCORD_RATE, DISCORD_CHANNELS);
+      const stream = Readable.from(scaledPcm);
+      const resource = createAudioResource(stream, { inputType: StreamType.Raw });
+
+      const finish = (advanceQueue: boolean) => {
+        if (playbackToken !== this.musicPlaybackToken) {
+          cleanup();
+          resolve();
+          return;
+        }
+        this.musicPlaying = false;
+        cleanup();
+        if (advanceQueue) {
+          void this.finishMusicTrack(track);
+        }
+        resolve();
+      };
+
+      const cleanup = () => {
+        this.player.off('stateChange', onStateChange);
+        clearTimeout(fallbackTimer);
+      };
+
+      let sawPlaying = false;
+      const onStateChange = (_old: AudioPlayerState, newState: AudioPlayerState) => {
+        if (newState.status === AudioPlayerStatus.Playing) {
+          sawPlaying = true;
+        }
+        if (sawPlaying && newState.status === AudioPlayerStatus.Idle) {
+          finish(true);
+        }
+      };
+
+      const fallbackTimer = setTimeout(() => finish(true), durationMs + 1_500);
+      fallbackTimer.unref?.();
+
+      this.player.on('stateChange', onStateChange);
+      this.player.play(resource);
+      this.connection?.subscribe(this.player);
+      this.diagnostics.discordOutputBytes += scaledPcm.length;
+      this.diagnostics.lastDiscordWriteAt = new Date().toISOString();
+      logger.info('Discord music playing complete track', {
+        guildId: this.guildId,
+        channelId: this.channelId,
+        title: track.title,
+        pcmBytes: scaledPcm.length,
+        durationMs,
+      });
+    });
+  }
+
   async playSong(query: string, options: { volume?: number } = {}) {
     const normalized = query.replace(/\s+/g, ' ').trim();
     if (!normalized) {
@@ -1374,9 +1442,13 @@ export class DiscordVoiceBridge implements MusicController, VoiceController {
       query: normalized,
       title: track.title,
       url: track.url,
-      durationSeconds: track.durationSeconds
+      durationSeconds: track.durationSeconds,
+      playerClients: track.playerClients,
     });
-    const started = this.playResolvedMusic(track, 0, { clearBufferedAudio: true, stopReason: 'replaced' });
+    this.musicPlaybackToken += 1;
+    this.musicPlaying = false;
+    this.player.stop();
+    const started = await this.playResolvedMusic(track, 0, { clearBufferedAudio: true, stopReason: 'replaced' });
     if (!started.ok) {
       return started;
     }
@@ -1391,8 +1463,12 @@ export class DiscordVoiceBridge implements MusicController, VoiceController {
   }
 
   async stopMusic() {
-    const wasActive = this.musicStatus.state === 'playing' || this.musicStatus.state === 'searching' || this.musicStatus.state === 'paused';
-    this.stopMusicProcesses('requested');
+    const wasActive = this.isMusicActive();
+    this.musicPlaybackToken += 1;
+    this.musicPlaying = false;
+    this.musicStopRequested = true;
+    this.player.stop();
+    this.cleanupMusicTempDir();
     this.mixer.clearMusic();
     this.musicQueue.length = 0;
     this.musicStatus = {
@@ -1407,21 +1483,68 @@ export class DiscordVoiceBridge implements MusicController, VoiceController {
     return { ok: true, stopped: wasActive };
   }
 
+  async skipMusic() {
+    if (!this.isMusicActive()) {
+      return { ok: false, error: 'music_not_playing', state: this.musicStatus.state };
+    }
+    this.musicPlaybackToken += 1;
+    this.musicPlaying = false;
+    this.musicStopRequested = true;
+    this.player.stop();
+    this.cleanupMusicTempDir();
+    this.mixer.clearMusic();
+
+    const next = this.musicQueue.shift();
+    if (!next) {
+      this.musicStatus = {
+        ...this.musicStatus,
+        state: 'idle',
+        startedAt: null,
+        positionSeconds: 0,
+        seekOffsetSeconds: 0,
+        queuedBytes: 0,
+        lastError: null
+      };
+      return { ok: true, skipped: true, state: 'idle' };
+    }
+
+    const current = this.currentTrack();
+    if (current) {
+      this.musicHistory.push(current);
+    }
+    this.musicStopRequested = false;
+    const started = await this.playResolvedMusic(next, 0, { clearBufferedAudio: true, stopReason: 'skip' });
+    if (!started.ok) {
+      return started;
+    }
+    return {
+      ok: true,
+      skipped: true,
+      state: 'playing',
+      title: next.title,
+      url: next.url,
+      durationSeconds: next.durationSeconds,
+      queueLength: this.musicQueue.length
+    };
+  }
+
   async pauseMusic() {
     if (this.musicStatus.state !== 'playing') {
       return { ok: false, error: 'music_not_playing', state: this.musicStatus.state };
     }
     const positionSeconds = this.currentMusicPositionSeconds();
+    this.musicPlaybackToken += 1;
+    this.musicPlaying = false;
+    this.player.stop();
+    this.mixer.clearMusic();
     this.musicStatus = {
       ...this.musicStatus,
       state: 'paused',
       positionSeconds,
       seekOffsetSeconds: positionSeconds,
       startedAt: null,
-      queuedBytes: this.mixer.getQueuedMusicBytes()
+      queuedBytes: 0
     };
-    this.stopMusicProcesses('paused');
-    this.mixer.clearMusic();
     return { ok: true, state: 'paused', positionSeconds };
   }
 
@@ -1430,10 +1553,11 @@ export class DiscordVoiceBridge implements MusicController, VoiceController {
       return { ok: false, error: 'music_not_paused', state: this.musicStatus.state };
     }
     const track = this.currentTrack();
-    if (!track) {
+    if (!track || !this.musicLocalPath) {
       return { ok: false, error: 'no_track_to_resume' };
     }
     const positionSeconds = this.clampSeekPosition(this.musicStatus.positionSeconds);
+    this.musicStopRequested = false;
     this.musicStatus = {
       ...this.musicStatus,
       state: 'playing',
@@ -1442,34 +1566,20 @@ export class DiscordVoiceBridge implements MusicController, VoiceController {
       positionSeconds,
       lastError: null
     };
-    const started = this.startMusicDecoder(track, positionSeconds);
-    if (!started.ok) {
-      return started;
+    try {
+      const pcm = await decodeAudioFileToDiscordPcm(this.config, this.musicLocalPath, positionSeconds);
+      const playbackToken = this.musicPlaybackToken;
+      void this.playCompleteMusic(pcm, track, playbackToken);
+      return { ok: true, state: 'playing', positionSeconds };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.musicStatus = { ...this.musicStatus, state: 'error', lastError: message };
+      return { ok: false, error: message };
     }
-    return { ok: true, state: 'playing', positionSeconds };
   }
 
   async nextMusic() {
-    const next = this.musicQueue.shift();
-    if (!next) {
-      return { ok: false, error: 'music_queue_empty', state: this.musicStatus.state };
-    }
-    const current = this.currentTrack();
-    if (current) {
-      this.musicHistory.push(current);
-    }
-    const started = this.playResolvedMusic(next, 0, { clearBufferedAudio: true, stopReason: 'next' });
-    if (!started.ok) {
-      return started;
-    }
-    return {
-      ok: true,
-      state: 'playing',
-      title: next.title,
-      url: next.url,
-      durationSeconds: next.durationSeconds,
-      queueLength: this.musicQueue.length
-    };
+    return this.skipMusic();
   }
 
   async previousMusic() {
@@ -1485,7 +1595,10 @@ export class DiscordVoiceBridge implements MusicController, VoiceController {
         queuedAt: new Date().toISOString()
       });
     }
-    const started = this.playResolvedMusic(previous, 0, { clearBufferedAudio: true, stopReason: 'previous' });
+    this.musicPlaybackToken += 1;
+    this.player.stop();
+    this.musicPlaying = false;
+    const started = await this.playResolvedMusic(previous, 0, { clearBufferedAudio: true, stopReason: 'previous' });
     if (!started.ok) {
       return started;
     }
@@ -1501,12 +1614,15 @@ export class DiscordVoiceBridge implements MusicController, VoiceController {
 
   async seekMusic(positionSeconds: number) {
     const track = this.currentTrack();
-    if (!track) {
+    if (!track || !this.musicLocalPath) {
       return { ok: false, error: 'no_music_loaded' };
     }
     const clamped = this.clampSeekPosition(positionSeconds);
-    this.stopMusicProcesses('seek');
+    this.musicPlaybackToken += 1;
+    this.player.stop();
+    this.musicPlaying = false;
     this.mixer.clearMusic();
+    this.musicStopRequested = false;
     this.musicStatus = {
       ...this.musicStatus,
       state: 'playing',
@@ -1515,11 +1631,16 @@ export class DiscordVoiceBridge implements MusicController, VoiceController {
       positionSeconds: clamped,
       lastError: null
     };
-    const started = this.startMusicDecoder(track, clamped);
-    if (!started.ok) {
-      return started;
+    try {
+      const pcm = await decodeAudioFileToDiscordPcm(this.config, this.musicLocalPath, clamped);
+      const playbackToken = this.musicPlaybackToken;
+      void this.playCompleteMusic(pcm, track, playbackToken);
+      return { ok: true, state: 'playing', positionSeconds: clamped };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.musicStatus = { ...this.musicStatus, state: 'error', lastError: message };
+      return { ok: false, error: message };
     }
-    return { ok: true, state: 'playing', positionSeconds: clamped };
   }
 
   async setMusicVolume(volume: number) {
@@ -1564,171 +1685,127 @@ export class DiscordVoiceBridge implements MusicController, VoiceController {
     };
   }
 
-  private playResolvedMusic(track: YoutubeTrack, positionSeconds: number, options: { clearBufferedAudio: boolean; stopReason: string }): Record<string, unknown> {
-    this.stopMusicProcesses(options.stopReason);
+  private async playResolvedMusic(
+    track: YoutubeTrack,
+    positionSeconds: number,
+    options: { clearBufferedAudio: boolean; stopReason: string },
+  ): Promise<Record<string, unknown>> {
+    const playbackToken = this.musicPlaybackToken;
+    this.cleanupMusicTempDir();
     if (options.clearBufferedAudio) {
       this.mixer.clearMusic();
     }
     this.musicStopRequested = false;
+
     this.musicStatus = {
       ...this.musicStatus,
-      state: 'playing',
+      state: 'searching',
       title: track.title,
       url: track.url,
       durationSeconds: track.durationSeconds,
-      startedAt: new Date().toISOString(),
+      startedAt: null,
       positionSeconds,
       seekOffsetSeconds: positionSeconds,
       lastError: null,
-      queuedBytes: this.mixer.getQueuedMusicBytes()
+      queuedBytes: 0,
     };
-    return this.startMusicDecoder(track, positionSeconds);
-  }
 
-  private startMusicDecoder(track: YoutubeTrack, positionSeconds: number): Record<string, unknown> {
-    const seekArgs = positionSeconds > 0 ? ['-ss', formatSeconds(positionSeconds)] : [];
-    const ytDlp = spawn(this.config.YTDLP_BINARY, [
-      '-f', YTDLP_AUDIO_FORMAT,
-      '--no-playlist',
-      '--no-warnings',
-      ...ytDlpCommonArgs(this.config, track.playerClients),
-      '-o', '-',
-      track.url
-    ], { stdio: ['ignore', 'pipe', 'pipe'] });
-    const ffmpeg = spawn(this.config.FFMPEG_BINARY, [
-      '-hide_banner',
-      '-loglevel', 'warning',
-      '-i', 'pipe:0',
-      ...seekArgs,
-      '-vn',
-      '-f', 's16le',
-      '-ar', String(DISCORD_RATE),
-      '-ac', String(DISCORD_CHANNELS),
-      'pipe:1'
-    ], { stdio: ['pipe', 'pipe', 'pipe'] });
-
-    this.musicYtDlp = ytDlp;
-    this.musicFfmpeg = ffmpeg;
-    this.musicStopRequested = false;
-    logger.info('Discord music decoder processes started', {
-      guildId: this.guildId,
-      channelId: this.channelId,
-      ytDlpBinary: this.config.YTDLP_BINARY,
-      ffmpegBinary: this.config.FFMPEG_BINARY,
-      title: track.title,
-      positionSeconds
-    });
-    let ytDlpStderr = '';
-    let ffmpegStderr = '';
-    let loggedFirstMusicChunk = false;
-    const failPlayback = (source: string, error: string) => {
-      if (this.musicStopRequested || (this.musicYtDlp !== ytDlp && this.musicFfmpeg !== ffmpeg)) {
-        return;
+    try {
+      const { tempDir, filePath } = await downloadYoutubeAudioToTemp(
+        this.config,
+        track.url,
+        track.playerClients,
+        track.streamUrl,
+      );
+      if (playbackToken !== this.musicPlaybackToken || this.musicStopRequested) {
+        removeTempDir(tempDir);
+        return { ok: false, error: 'cancelled' };
       }
-      const message = `${source}: ${error}`;
-      this.musicStatus = { ...this.musicStatus, state: 'error', lastError: message, positionSeconds: this.currentMusicPositionSeconds() };
-      this.recordError(message);
-      logger.warn('Discord music playback failed', {
+      this.musicTempDir = tempDir;
+      this.musicLocalPath = filePath;
+      logger.info('Discord music downloaded for playback', {
         guildId: this.guildId,
         channelId: this.channelId,
-        source,
-        error
+        title: track.title,
+        filePath,
       });
-      this.stopMusicProcesses('error');
-      this.mixer.clearMusic();
-    };
 
-    ytDlp.stderr?.on('data', (chunk: Buffer) => {
-      ytDlpStderr = appendLimited(ytDlpStderr, chunk.toString('utf8'));
-    });
-    ffmpeg.stderr?.on('data', (chunk: Buffer) => {
-      ffmpegStderr = appendLimited(ffmpegStderr, chunk.toString('utf8'));
-    });
-    ytDlp.once('error', (error) => failPlayback('yt-dlp', error.message));
-    ffmpeg.once('error', (error) => failPlayback('ffmpeg', error.message));
-    ytDlp.once('close', (code) => {
-      if (this.musicYtDlp !== ytDlp || this.musicStopRequested) {
-        return;
+      const pcm = await decodeAudioFileToDiscordPcm(this.config, filePath, positionSeconds);
+      if (playbackToken !== this.musicPlaybackToken || this.musicStopRequested) {
+        return { ok: false, error: 'cancelled' };
       }
-      if (code && code !== 0) {
-        failPlayback('yt-dlp', compactYtDlpError(ytDlpStderr.trim() || `exited with code ${code}`));
+      if (!pcm.length) {
+        throw new Error('Decoded track contained no audio');
       }
-    });
-    ffmpeg.once('close', (code) => {
-      if (this.musicFfmpeg !== ffmpeg || this.musicStopRequested) {
-        return;
-      }
-      if (code && code !== 0) {
-        failPlayback('ffmpeg', ffmpegStderr.trim() || `exited with code ${code}`);
-        return;
-      }
-      this.finishMusicTrack(track);
-    });
-    ffmpeg.stdin?.once('error', () => {
-      // The decoder can close stdin while yt-dlp is still unwinding after stop/error.
-    });
-    if (!ytDlp.stdout || !ffmpeg.stdin || !ffmpeg.stdout) {
-      failPlayback('process', 'failed_to_open_audio_pipes');
-      return { ok: false, error: 'failed_to_open_audio_pipes' };
+
+      this.musicStatus = {
+        ...this.musicStatus,
+        state: 'playing',
+        title: track.title,
+        url: track.url,
+        durationSeconds: track.durationSeconds,
+        startedAt: new Date().toISOString(),
+        positionSeconds,
+        seekOffsetSeconds: positionSeconds,
+        lastError: null,
+        queuedBytes: 0,
+      };
+      void this.playCompleteMusic(pcm, track, playbackToken);
+      return { ok: true };
+    } catch (error) {
+      const message = compactYtDlpError(error);
+      this.musicStatus = {
+        ...this.musicStatus,
+        state: 'error',
+        lastError: message,
+      };
+      this.recordError(message);
+      this.cleanupMusicTempDir();
+      return { ok: false, error: message };
     }
-    ytDlp.stdout.pipe(ffmpeg.stdin);
-    ffmpeg.stdout.on('data', (chunk: Buffer) => {
-      if (this.musicFfmpeg !== ffmpeg || this.musicStopRequested || this.musicStatus.state !== 'playing') {
-        return;
-      }
-      if (!loggedFirstMusicChunk) {
-        loggedFirstMusicChunk = true;
-        logger.info('Discord music decoded first PCM chunk', {
-          guildId: this.guildId,
-          channelId: this.channelId,
-          title: track.title,
-          positionSeconds,
-          pcmBytes: chunk.length
-        });
-      }
-      this.mixer.enqueueMusic(chunk);
-      this.musicStatus.queuedBytes = this.mixer.getQueuedMusicBytes();
-      if (this.musicStatus.queuedBytes >= MUSIC_QUEUE_HIGH_WATER_BYTES) {
-        ffmpeg.stdout.pause();
-      }
-    });
-    return { ok: true };
+  }
+
+  private cleanupMusicTempDir() {
+    removeTempDir(this.musicTempDir);
+    this.musicTempDir = null;
+    this.musicLocalPath = null;
   }
 
   private finishMusicTrack(track: YoutubeTrack) {
-    this.musicYtDlp = null;
-    this.musicFfmpeg = null;
+    this.cleanupMusicTempDir();
     const positionSeconds = this.currentMusicPositionSeconds();
 
     if (this.musicStatus.loopCurrent) {
-      const started = this.playResolvedMusic(track, 0, { clearBufferedAudio: false, stopReason: 'loop' });
-      if (!started.ok) {
-        this.musicStatus = {
-          ...this.musicStatus,
-          state: 'error',
-          startedAt: null,
-          positionSeconds,
-          queuedBytes: this.mixer.getQueuedMusicBytes(),
-          lastError: typeof started.error === 'string' ? started.error : 'failed_to_loop_music'
-        };
-      }
+      void this.playResolvedMusic(track, 0, { clearBufferedAudio: false, stopReason: 'loop' }).then((started) => {
+        if (!started.ok) {
+          this.musicStatus = {
+            ...this.musicStatus,
+            state: 'error',
+            startedAt: null,
+            positionSeconds,
+            queuedBytes: 0,
+            lastError: typeof started.error === 'string' ? started.error : 'failed_to_loop_music',
+          };
+        }
+      });
       return;
     }
 
     const next = this.musicQueue.shift();
     if (next) {
       this.musicHistory.push(track);
-      const started = this.playResolvedMusic(next, 0, { clearBufferedAudio: false, stopReason: 'queue' });
-      if (!started.ok) {
-        this.musicStatus = {
-          ...this.musicStatus,
-          state: 'error',
-          startedAt: null,
-          positionSeconds,
-          queuedBytes: this.mixer.getQueuedMusicBytes(),
-          lastError: typeof started.error === 'string' ? started.error : 'failed_to_play_next_music'
-        };
-      }
+      void this.playResolvedMusic(next, 0, { clearBufferedAudio: false, stopReason: 'queue' }).then((started) => {
+        if (!started.ok) {
+          this.musicStatus = {
+            ...this.musicStatus,
+            state: 'error',
+            startedAt: null,
+            positionSeconds,
+            queuedBytes: 0,
+            lastError: typeof started.error === 'string' ? started.error : 'failed_to_play_next_music',
+          };
+        }
+      });
       return;
     }
 
@@ -1737,7 +1814,7 @@ export class DiscordVoiceBridge implements MusicController, VoiceController {
       state: 'idle',
       startedAt: null,
       positionSeconds,
-      queuedBytes: this.mixer.getQueuedMusicBytes()
+      queuedBytes: 0,
     };
   }
 
@@ -1749,32 +1826,6 @@ export class DiscordVoiceBridge implements MusicController, VoiceController {
     };
     this.musicQueue.push(entry);
     return entry;
-  }
-
-  private stopMusicProcesses(reason: string) {
-    this.musicStopRequested = true;
-    const ytDlp = this.musicYtDlp;
-    const ffmpeg = this.musicFfmpeg;
-    this.musicYtDlp = null;
-    this.musicFfmpeg = null;
-    ytDlp?.stdout?.destroy();
-    ytDlp?.stderr?.destroy();
-    ffmpeg?.stdin?.destroy();
-    ffmpeg?.stdout?.destroy();
-    ffmpeg?.stderr?.destroy();
-    if (ytDlp && !ytDlp.killed) {
-      ytDlp.kill('SIGTERM');
-    }
-    if (ffmpeg && !ffmpeg.killed) {
-      ffmpeg.kill('SIGTERM');
-    }
-    if (reason !== 'replaced') {
-      logger.info('Stopped Discord music playback', {
-        guildId: this.guildId,
-        channelId: this.channelId,
-        reason
-      });
-    }
   }
 
   private currentTrack(): YoutubeTrack | null {
@@ -1789,7 +1840,10 @@ export class DiscordVoiceBridge implements MusicController, VoiceController {
   }
 
   private isMusicActive() {
-    return this.musicStatus.state === 'searching' || this.musicStatus.state === 'playing' || this.musicStatus.state === 'paused';
+    return this.musicPlaying
+      || this.musicStatus.state === 'searching'
+      || this.musicStatus.state === 'playing'
+      || this.musicStatus.state === 'paused';
   }
 
   private currentMusicPositionSeconds() {
@@ -1809,13 +1863,6 @@ export class DiscordVoiceBridge implements MusicController, VoiceController {
   private recordError(error: string) {
     this.diagnostics.lastError = error;
   }
-}
-
-interface YoutubeTrack {
-  title: string;
-  url: string;
-  durationSeconds: number | null;
-  playerClients?: string;
 }
 
 interface PcmQueueEntry {
@@ -1979,17 +2026,19 @@ function loadVoiceChangerConfig(configPath: string): VoiceChangerConfig {
 
 function isVoiceToolEnabled(name: string, features: PlanFeatures) {
   if (name === 'searchWeb') return features.webSearch;
-  if (['playSong', 'pauseMusic', 'resumeMusic', 'stopMusic', 'nextMusic', 'previousMusic', 'seekMusic', 'setMusicVolume', 'setMusicLoop', 'getMusicStatus'].includes(name)) return features.music;
+  if (['playSong', 'pauseMusic', 'resumeMusic', 'stopMusic', 'skipMusic', 'nextMusic', 'previousMusic', 'seekMusic', 'setMusicVolume', 'setMusicLoop', 'getMusicStatus'].includes(name)) return features.music;
   return true;
 }
 
 class DiscordPcmMixer {
   private output: PassThrough | null = null;
-  private timer: ReturnType<typeof setInterval> | null = null;
+  private tickTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly assistantQueue: PcmQueueEntry[] = [];
   private readonly musicQueue: PcmQueueEntry[] = [];
   private assistantQueuedBytes = 0;
   private musicQueuedBytes = 0;
+  private musicIngress = Buffer.alloc(0);
+  private musicPlaybackArmed = false;
   private assistantActiveUntil = 0;
   private idleTicks = 0;
   private musicVolume: number;
@@ -2024,15 +2073,38 @@ class DiscordPcmMixer {
     if (!buffer.length) {
       return;
     }
-    this.musicQueue.push({ buffer, offset: 0 });
-    this.musicQueuedBytes += buffer.length;
-    this.options.onMusicQueueChange(this.musicQueuedBytes);
+    this.musicIngress = this.musicIngress.length
+      ? Buffer.concat([this.musicIngress, buffer])
+      : buffer;
+
+    const totalBuffered = this.musicQueuedBytes + this.musicIngress.length;
+    if (!this.musicPlaybackArmed) {
+      this.options.onMusicQueueChange(totalBuffered);
+      if (totalBuffered < MUSIC_PREBUFFER_BYTES) {
+        return;
+      }
+      this.musicPlaybackArmed = true;
+    }
+
+    this.flushMusicIngressFrames();
     this.ensureStarted();
+  }
+
+  private flushMusicIngressFrames() {
+    while (this.musicIngress.length >= MIXER_FRAME_BYTES) {
+      const frame = this.musicIngress.subarray(0, MIXER_FRAME_BYTES);
+      this.musicQueue.push({ buffer: Buffer.from(frame), offset: 0 });
+      this.musicQueuedBytes += MIXER_FRAME_BYTES;
+      this.musicIngress = this.musicIngress.subarray(MIXER_FRAME_BYTES);
+    }
+    this.options.onMusicQueueChange(this.musicQueuedBytes + this.musicIngress.length);
   }
 
   clearMusic() {
     this.musicQueue.length = 0;
     this.musicQueuedBytes = 0;
+    this.musicIngress = Buffer.alloc(0);
+    this.musicPlaybackArmed = false;
     this.options.onMusicQueueChange(0);
   }
 
@@ -2050,7 +2122,7 @@ class DiscordPcmMixer {
   }
 
   getQueuedMusicBytes() {
-    return this.musicQueuedBytes;
+    return this.musicQueuedBytes + this.musicIngress.length;
   }
 
   destroy() {
@@ -2059,6 +2131,8 @@ class DiscordPcmMixer {
     this.musicQueue.length = 0;
     this.assistantQueuedBytes = 0;
     this.musicQueuedBytes = 0;
+    this.musicIngress = Buffer.alloc(0);
+    this.musicPlaybackArmed = false;
     this.options.onMusicQueueChange(0);
     this.endOutput();
   }
@@ -2068,12 +2142,19 @@ class DiscordPcmMixer {
       this.output = new PassThrough({ highWaterMark: 1024 * 1024 });
       this.options.onStart(this.output);
     }
-    if (!this.timer) {
+    if (!this.tickTimer) {
       this.idleTicks = 0;
-      this.timer = setInterval(() => this.tick(), MIXER_FRAME_MS);
-      this.timer.unref?.();
-      this.tick();
+      this.scheduleTick();
     }
+  }
+
+  private scheduleTick() {
+    const tickStart = performance.now();
+    this.tick();
+    const elapsed = performance.now() - tickStart;
+    const delay = Math.max(1, MIXER_FRAME_MS - elapsed);
+    this.tickTimer = setTimeout(() => this.scheduleTick(), delay);
+    this.tickTimer.unref?.();
   }
 
   private tick() {
@@ -2083,6 +2164,10 @@ class DiscordPcmMixer {
     const hasMusic = Boolean(musicFrame);
 
     if (!hasAssistant && !hasMusic) {
+      if (this.musicPlaybackArmed) {
+        this.output?.write(Buffer.alloc(MIXER_FRAME_BYTES));
+        return;
+      }
       this.idleTicks += 1;
       if (this.idleTicks * MIXER_FRAME_MS >= MIXER_IDLE_END_MS) {
         this.clearTimer();
@@ -2121,9 +2206,9 @@ class DiscordPcmMixer {
   }
 
   private clearTimer() {
-    if (this.timer) {
-      clearInterval(this.timer);
-      this.timer = null;
+    if (this.tickTimer) {
+      clearTimeout(this.tickTimer);
+      this.tickTimer = null;
     }
   }
 
@@ -2208,158 +2293,15 @@ function mixPcmFrames(assistantFrame: Buffer | null, musicFrame: Buffer | null, 
   return output;
 }
 
-function formatSeconds(seconds: number) {
-  return seconds.toFixed(3);
-}
-
-async function resolveYoutubeTrack(config: AppConfig, query: string): Promise<YoutubeTrack> {
-  if (isProbablyUrl(query)) {
-    try {
-      return await inspectYoutubeTrack(config, query, query);
-    } catch (error) {
-      throw new Error(compactYtDlpError(error));
-    }
+function applyPcmVolume(pcm: Buffer, volume: number) {
+  if (volume >= 0.999) {
+    return pcm;
   }
-
-  const search = await captureProcessOutput(config.YTDLP_BINARY, [
-    '--flat-playlist',
-    '--dump-single-json',
-    '--no-warnings',
-    ...ytDlpCommonArgs(config),
-    `ytsearch${YTDLP_SEARCH_RESULTS}:${query}`
-  ], 25_000);
-  const parsedSearch = JSON.parse(search) as { entries?: unknown };
-  const entries = Array.isArray(parsedSearch.entries) ? parsedSearch.entries : [];
-  const candidates = entries
-    .map((entry) => normalizeYoutubeSearchEntry(entry))
-    .filter((entry): entry is YoutubeTrack => Boolean(entry));
-  if (!candidates.length) {
-    throw new Error('yt-dlp returned no YouTube search results');
+  const scaled = Buffer.allocUnsafe(pcm.length);
+  for (let offset = 0; offset < pcm.length; offset += 2) {
+    scaled.writeInt16LE(clampInt16(Math.round(pcm.readInt16LE(offset) * volume)), offset);
   }
-
-  const failures: string[] = [];
-  for (const candidate of candidates) {
-    try {
-      return await inspectYoutubeTrack(config, candidate.url, candidate.title);
-    } catch (error) {
-      failures.push(`${candidate.title}: ${compactYtDlpError(error)}`);
-    }
-  }
-
-  throw new Error(`No playable audio result found. ${failures.slice(0, 3).join(' | ')}`);
-}
-
-async function inspectYoutubeTrack(config: AppConfig, url: string, fallbackTitle: string): Promise<YoutubeTrack> {
-  const playerClientOptions = [...new Set([config.YTDLP_PLAYER_CLIENTS.trim() || 'default', 'default'])];
-  let lastError: unknown;
-  for (const playerClients of playerClientOptions) {
-    try {
-      const output = await captureProcessOutput(config.YTDLP_BINARY, [
-        '--dump-json',
-        '--no-playlist',
-        '--skip-download',
-        '-f', YTDLP_AUDIO_FORMAT,
-        ...ytDlpCommonArgs(config, playerClients),
-        url
-      ], 25_000);
-      const line = output.split(/\r?\n/).find((candidate) => candidate.trim().startsWith('{'));
-      if (!line) throw new Error('yt-dlp returned no track metadata');
-      const parsed = JSON.parse(line) as {
-        title?: unknown;
-        webpage_url?: unknown;
-        original_url?: unknown;
-        duration?: unknown;
-        requested_downloads?: unknown;
-        requested_formats?: unknown;
-        formats?: unknown;
-      };
-      if (!hasAudioFormat(parsed)) throw new Error('yt-dlp found the result, but it has no audio formats');
-      const resolvedUrl = firstString(parsed.webpage_url, parsed.original_url);
-      if (!resolvedUrl) throw new Error('yt-dlp track metadata did not include a YouTube URL');
-      return {
-        title: typeof parsed.title === 'string' && parsed.title.trim() ? parsed.title.trim() : fallbackTitle,
-        url: resolvedUrl,
-        durationSeconds: typeof parsed.duration === 'number' && Number.isFinite(parsed.duration) ? parsed.duration : null,
-        playerClients
-      };
-    } catch (error) {
-      lastError = error;
-      if (playerClients !== 'default') {
-        logger.warn('yt-dlp configured player clients failed; retrying with current defaults', {
-          configuredPlayerClients: playerClients,
-          url,
-          error: compactYtDlpError(error)
-        });
-      }
-    }
-  }
-  throw lastError ?? new Error('yt-dlp could not inspect the YouTube track');
-}
-
-function normalizeYoutubeSearchEntry(entry: unknown): YoutubeTrack | null {
-  const candidate = entry as { title?: unknown; url?: unknown; webpage_url?: unknown; id?: unknown; duration?: unknown };
-  const rawUrl = firstString(candidate.webpage_url, candidate.url);
-  const id = typeof candidate.id === 'string' && candidate.id.trim() ? candidate.id.trim() : null;
-  const url = rawUrl?.startsWith('http')
-    ? rawUrl
-    : id
-      ? `https://www.youtube.com/watch?v=${id}`
-      : null;
-  if (!url) {
-    return null;
-  }
-  return {
-    title: typeof candidate.title === 'string' && candidate.title.trim() ? candidate.title.trim() : url,
-    url,
-    durationSeconds: typeof candidate.duration === 'number' && Number.isFinite(candidate.duration) ? candidate.duration : null
-  };
-}
-
-function hasAudioFormat(parsed: {
-  requested_downloads?: unknown;
-  requested_formats?: unknown;
-  formats?: unknown;
-}) {
-  const requestedDownloads = Array.isArray(parsed.requested_downloads) ? parsed.requested_downloads : [];
-  const requestedFormats = Array.isArray(parsed.requested_formats) ? parsed.requested_formats : [];
-  const formats = Array.isArray(parsed.formats) ? parsed.formats : [];
-  const allFormats = [...requestedDownloads, ...requestedFormats, ...formats];
-  return allFormats.some((format) => {
-    const candidate = format as { acodec?: unknown; audio_ext?: unknown; vcodec?: unknown };
-    return (typeof candidate.acodec === 'string' && candidate.acodec !== 'none')
-      || (typeof candidate.audio_ext === 'string' && candidate.audio_ext !== 'none')
-      || (typeof candidate.vcodec === 'string' && candidate.vcodec === 'none');
-  });
-}
-
-function ytDlpCommonArgs(config: AppConfig, playerClients = config.YTDLP_PLAYER_CLIENTS) {
-  const args: string[] = [
-    '--remote-components',
-    config.YTDLP_REMOTE_COMPONENTS,
-    '--js-runtimes',
-    config.YTDLP_JS_RUNTIME,
-    '--extractor-args',
-    `youtube:player_client=${playerClients}`
-  ];
-  const cookiesPath = config.YTDLP_COOKIES_PATH?.trim();
-  if (cookiesPath && isRegularFile(cookiesPath)) {
-    const writableCookiesPath = prepareWritableCookiesFile(cookiesPath);
-    if (writableCookiesPath) {
-      args.push('--cookies', writableCookiesPath);
-    }
-  }
-  const cookiesFromBrowser = config.YTDLP_COOKIES_FROM_BROWSER?.trim();
-  if (cookiesFromBrowser) {
-    args.push('--cookies-from-browser', cookiesFromBrowser);
-  }
-  const potProviderUrl = config.YTDLP_POT_PROVIDER_URL?.trim();
-  if (potProviderUrl) {
-    args.push(
-      '--extractor-args',
-      `youtubepot-bgutilhttp:base_url=${potProviderUrl}`
-    );
-  }
-  return args;
+  return scaled;
 }
 
 function isRegularFile(path: string) {
@@ -2370,96 +2312,9 @@ function isRegularFile(path: string) {
   }
 }
 
-function prepareWritableCookiesFile(sourcePath: string) {
-  try {
-    const directory = join(tmpdir(), 'giada-yt-dlp');
-    const runtimePath = join(directory, `youtube-cookies-${process.pid}.txt`);
-    mkdirSync(directory, { recursive: true, mode: 0o700 });
-    const sourceModifiedAt = statSync(sourcePath).mtimeMs;
-    const runtimeModifiedAt = isRegularFile(runtimePath) ? statSync(runtimePath).mtimeMs : -1;
-    if (sourceModifiedAt > runtimeModifiedAt) {
-      copyFileSync(sourcePath, runtimePath);
-      chmodSync(runtimePath, 0o600);
-      logger.info('Copied read-only yt-dlp cookies to writable runtime storage', {
-        sourcePath,
-        runtimePath
-      });
-    }
-    return runtimePath;
-  } catch (error) {
-    logger.warn('Could not prepare writable yt-dlp cookies file; continuing without cookies', {
-      sourcePath,
-      error: error instanceof Error ? error.message : String(error)
-    });
-    return null;
-  }
-}
-
-function compactYtDlpError(error: unknown) {
-  const raw = error instanceof Error ? error.message : String(error);
-  const errorLine = raw.split(/\r?\n/).reverse().find((line) => line.startsWith('ERROR:')) ?? raw.split(/\r?\n/).find(Boolean) ?? raw;
-  if (/Sign in to confirm you.re not a bot|cookies-from-browser|authentication/i.test(raw)) {
-    return 'YouTube requires authenticated cookies for this server IP. Export fresh Netscape-format cookies to the configured YTDLP_COOKIES_PATH and restart the service.';
-  }
-  if (/Read-only file system.*cookies/i.test(raw)) {
-    return 'yt-dlp could not update its cookie jar because the configured file is read-only. Restart with the writable runtime-cookie copy enabled.';
-  }
-  if (/HTTP Error 403|Forbidden|unable to download video data/i.test(raw)) {
-    return 'YouTube blocked the media download with HTTP 403. Verify fresh cookies, Deno JS challenge support, and yt-dlp EJS remote components; a PO-token provider may still be required.';
-  }
-  if (/Precondition check failed|Signature extraction failed|Requested format is not available|Only images are available/i.test(raw)) {
-    return `YouTube audio extraction failed (${errorLine.replace(/^ERROR:\s*/, '')}). Updating yt-dlp may be required.`;
-  }
-  return errorLine.replace(/^ERROR:\s*/, '').slice(0, 500);
-}
-
-function captureProcessOutput(command: string, args: string[], timeoutMs: number) {
-  return new Promise<string>((resolve, reject) => {
-    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
-    let stdout = '';
-    let stderr = '';
-    const timeout = setTimeout(() => {
-      child.kill('SIGTERM');
-      reject(new Error(`${command} timed out`));
-    }, timeoutMs);
-    timeout.unref?.();
-    child.stdout?.on('data', (chunk: Buffer) => {
-      stdout = appendLimited(stdout, chunk.toString('utf8'), 1024 * 1024);
-    });
-    child.stderr?.on('data', (chunk: Buffer) => {
-      stderr = appendLimited(stderr, chunk.toString('utf8'));
-    });
-    child.once('error', (error) => {
-      clearTimeout(timeout);
-      reject(error);
-    });
-    child.once('close', (code) => {
-      clearTimeout(timeout);
-      if (code && code !== 0) {
-        reject(new Error(stderr.trim() || `${command} exited with code ${code}`));
-        return;
-      }
-      resolve(stdout);
-    });
-  });
-}
-
 function appendLimited(current: string, next: string, limit = 4000) {
   const combined = current + next;
   return combined.length > limit ? combined.slice(combined.length - limit) : combined;
-}
-
-function firstString(...values: unknown[]) {
-  for (const value of values) {
-    if (typeof value === 'string' && value.trim()) {
-      return value.trim();
-    }
-  }
-  return null;
-}
-
-function isProbablyUrl(value: string) {
-  return /^https?:\/\//i.test(value);
 }
 
 function downsampleDiscordPcmForGemini(input: Buffer) {

@@ -10,6 +10,7 @@ secrets/*
 apps/server/data/
 data/*.sqlite
 data/debug-audio/
+data/training/
 __pycache__/
 *.pyc
 apps/desktop/src-tauri/target/

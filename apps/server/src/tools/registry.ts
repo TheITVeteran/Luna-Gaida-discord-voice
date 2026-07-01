@@ -21,6 +21,7 @@ export interface MusicController {
   pauseMusic(): Promise<Record<string, unknown>>;
   resumeMusic(): Promise<Record<string, unknown>>;
   stopMusic(): Promise<Record<string, unknown>>;
+  skipMusic(): Promise<Record<string, unknown>>;
   nextMusic(): Promise<Record<string, unknown>>;
   previousMusic(): Promise<Record<string, unknown>>;
   seekMusic(positionSeconds: number): Promise<Record<string, unknown>>;

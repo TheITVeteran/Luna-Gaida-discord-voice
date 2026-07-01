@@ -17,6 +17,8 @@ import { UserVoiceMemoryStore } from '../memory/userVoiceMemory.js';
 import { LunaLifeStore } from '../memory/lunaLifeStore.js';
 import { updateUserVoiceMemory } from '../memory/updateUserVoiceMemory.js';
 import { updateUserRelationship } from '../memory/updateUserRelationship.js';
+import { updateUserConcepts } from '../memory/updateUserConcepts.js';
+import { buildConceptPromptBlock } from '../memory/conceptMemory.js';
 import { buildRelationshipPromptBlock, buildAbsencePromptBlock, hoursSinceLastContact, mostRecentContactAt } from '../memory/relationshipBond.js';
 import { updateLunaLife } from '../memory/updateLunaLife.js';
 import { buildVoiceCallContextBlock, buildVoiceCallContextForMemory, recordParticipantNames } from './voiceCallContext.js';
@@ -51,6 +53,8 @@ import {
   fetchConversationTopic,
   formatConversationTopicBlock
 } from '../research/conversationTopics.js';
+import { LunaDatasetLogger } from '../training/lunaDatasetLogger.js';
+import { buildLunaTrainingRecord, buildLunaTrainingState } from '../training/lunaTrainingState.js';
 
 export type { LunaInitiativeHost };
 
@@ -83,6 +87,7 @@ export class LocalVoiceSessionManager {
   private lastSpeechAt = Date.now();
   private vibeListening = false;
   private avatarWardrobe: AvatarWardrobePayload = { outfit: 'light', accessories: [] };
+  private readonly lunaDatasetLogger: LunaDatasetLogger;
 
   constructor(
     private readonly config: AppConfig,
@@ -110,6 +115,7 @@ export class LocalVoiceSessionManager {
     this.userVoiceMemory = new UserVoiceMemoryStore(config.databasePath);
     this.lunaLife = new LunaLifeStore(config.databasePath);
     this.lunaResearch = new LunaResearchStore(config.databasePath);
+    this.lunaDatasetLogger = new LunaDatasetLogger(config);
     this.fishTts = config.LUNA_TTS_PROVIDER === 'fish' && config.FISH_AUDIO_API_KEY?.trim()
       ? new FishAudioTts({
         apiKey: config.FISH_AUDIO_API_KEY,
@@ -777,6 +783,7 @@ export class LocalVoiceSessionManager {
     this.syncBondWardrobe(callerRelationship);
 
     let memoryBlock = '';
+    let conceptBlock = '';
     let relationshipBlock = '';
     let absenceBlock = '';
     if (this.config.LUNA_USER_VOICE_MEMORY && speaker) {
@@ -784,6 +791,7 @@ export class LocalVoiceSessionManager {
       if (record?.summary?.trim()) {
         memoryBlock = `\nWhat you remember about ${speaker.displayName} from past voice chats (facts only):\n${record.summary}`;
       }
+      conceptBlock = `\n${buildConceptPromptBlock(speaker.displayName, record?.concepts?.trim() || null)}`;
       relationshipBlock = buildRelationshipPromptBlock(
         speaker.displayName,
         record?.relationship?.trim() || null
@@ -877,6 +885,7 @@ export class LocalVoiceSessionManager {
       lifeBlock,
       absenceBlock,
       relationshipBlock,
+      conceptBlock,
       memoryBlock,
       callContextBlock
     ].filter(Boolean).join('\n');
@@ -900,12 +909,24 @@ export class LocalVoiceSessionManager {
       return;
     }
 
+    const recentTurnsForTraining = history.snapshot();
     const spokenForUi = await this.deliverAssistantSpeech(cleaned, {
       surface,
       relationship: callerRelationship,
       history,
       userLabel: userText
     });
+
+    if (spokenForUi) {
+      this.logVoiceTrainingTurn({
+        surface,
+        speaker,
+        userText,
+        spokenForUi,
+        recentTurns: recentTurnsForTraining,
+        researchSnippet: researchBlock?.trim() || null
+      });
+    }
 
     if (this.config.LUNA_USER_VOICE_MEMORY && speaker && spokenForUi) {
       const existing = this.userVoiceMemory.get(speaker.guildId, speaker.userId);
@@ -949,6 +970,18 @@ export class LocalVoiceSessionManager {
           recentHistory,
           callContext: memoryCallContext
         }),
+        updateUserConcepts({
+          store: this.userVoiceMemory,
+          ollama: this.ollama,
+          guildId: speaker.guildId,
+          userId: speaker.userId,
+          displayName: speaker.displayName,
+          userSaid: userText,
+          lunaReplied: spokenForUi,
+          existingConcepts: existing?.concepts ?? null,
+          existingFacts: existing?.summary ?? null,
+          recentHistory
+        }),
         updateUserRelationship({
           store: this.userVoiceMemory,
           ollama: this.ollama,
@@ -962,13 +995,21 @@ export class LocalVoiceSessionManager {
           hoursSinceLastContact: hoursSince
         }),
         lifePromise
-      ]).then(([summary, relationship, life]) => {
+      ]).then(([summary, concepts, relationship, life]) => {
         if (summary?.trim()) {
           publishActivity({
             level: 'info',
             title: `Remembering ${speaker.displayName}`,
             detail: summary,
             meta: { userId: speaker.userId, guildId: speaker.guildId, kind: 'facts' }
+          });
+        }
+        if (concepts?.trim()) {
+          publishActivity({
+            level: 'info',
+            title: `Understanding ${speaker.displayName}`,
+            detail: concepts,
+            meta: { userId: speaker.userId, guildId: speaker.guildId, kind: 'concepts' }
           });
         }
         if (relationship?.trim()) {
@@ -1006,6 +1047,54 @@ export class LocalVoiceSessionManager {
 
     this.awaitingCommandUntil = 0;
     this.noteSpeechActivity();
+  }
+
+  private logVoiceTrainingTurn(input: {
+    surface: LiveSurface;
+    speaker: VoiceSpeakerContext | null;
+    userText: string;
+    spokenForUi: string;
+    recentTurns: ReturnType<ConversationHistory['snapshot']>;
+    researchSnippet: string | null;
+  }) {
+    const record = input.speaker && this.config.LUNA_USER_VOICE_MEMORY
+      ? this.userVoiceMemory.get(input.speaker.guildId, input.speaker.userId)
+      : null;
+    const hoursSince = hoursSinceLastContact(record?.updatedAt);
+    const absenceNote = input.speaker
+      ? buildAbsencePromptBlock(
+        input.speaker.displayName,
+        record?.relationship?.trim() || null,
+        hoursSince,
+        this.config.lunaAbsenceMissHours
+      )
+      : null;
+    const lifeNarrative = input.speaker && this.config.LUNA_LIFE_MEMORY
+      ? this.lunaLife.getNarrative(input.speaker.guildId)
+      : null;
+    const trainingSurface = input.surface === 'discord'
+      ? 'discord'
+      : input.surface === 'browser'
+        ? 'browser'
+        : 'desktop';
+
+    this.lunaDatasetLogger.log(buildLunaTrainingRecord({
+      source: 'live_voice',
+      state: buildLunaTrainingState({
+        surface: trainingSurface,
+        callerName: input.speaker?.displayName ?? 'Caller',
+        relationship: record?.relationship ?? null,
+        factsSummary: record?.summary ?? null,
+        conceptsSummary: record?.concepts ?? null,
+        lifeNarrative,
+        hoursSinceContact: hoursSince,
+        absenceNote,
+        recentTurns: input.recentTurns,
+        researchSnippet: input.researchSnippet
+      }),
+      userMessage: input.userText,
+      assistant: input.spokenForUi
+    }));
   }
 
   private historyForSpeaker(speaker: VoiceSpeakerContext | null) {

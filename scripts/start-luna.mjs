@@ -6,6 +6,46 @@ import { fileURLToPath } from 'node:url';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const healthUrl = 'http://127.0.0.1:8787/health';
 
+function loadEnvValue(key) {
+  if (process.env[key]?.trim()) return process.env[key].trim();
+  try {
+    const envText = readFileSync(path.join(root, '.env'), 'utf8');
+    const match = envText.match(new RegExp(`^${key}=(.+)$`, 'm'));
+    if (match?.[1]) return match[1].trim();
+  } catch {
+    // ignore
+  }
+  return '';
+}
+
+function ollamaTagsUrl() {
+  const apiUrl = loadEnvValue('OLLAMA_API_URL') || 'http://127.0.0.1:11434/v1/chat/completions';
+  try {
+    return `${new URL(apiUrl).origin}/api/tags`;
+  } catch {
+    return 'http://127.0.0.1:11434/api/tags';
+  }
+}
+
+function wakeOllama() {
+  spawn('ollama', ['list'], { shell: true, stdio: 'ignore', detached: true }).unref?.();
+}
+
+async function ensureOllama() {
+  const tagsUrl = ollamaTagsUrl();
+  if (await isUp(tagsUrl)) {
+    return true;
+  }
+  console.log('  Ollama:   not responding — waking Ollama…');
+  wakeOllama();
+  if (await waitFor(tagsUrl, 30, 2000)) {
+    console.log('  Ollama:   ready');
+    return true;
+  }
+  console.warn('  Ollama:   still not reachable. Voice brain and DM initiative need Ollama running.');
+  return false;
+}
+
 function loadFluffyPath() {
   if (process.env.LUNA_FLUFFY_PATH?.trim()) {
     return process.env.LUNA_FLUFFY_PATH.trim();
@@ -21,18 +61,6 @@ function loadFluffyPath() {
 }
 
 const fluffyPath = loadFluffyPath();
-
-function loadEnvValue(key) {
-  if (process.env[key]?.trim()) return process.env[key].trim();
-  try {
-    const envText = readFileSync(path.join(root, '.env'), 'utf8');
-    const match = envText.match(new RegExp(`^${key}=(.+)$`, 'm'));
-    if (match?.[1]) return match[1].trim();
-  } catch {
-    // ignore
-  }
-  return '';
-}
 
 function defaultLive2dModel() {
   const anhei = 'D:\\tuzi_anhei\\tuzi anhei.luna.model3.json';
@@ -126,6 +154,13 @@ async function main() {
   console.log('  Avatar:   ' + fluffyPath);
   if (live2dModel) console.log('  Model:    ' + live2dModel);
   console.log('');
+
+  const voiceProvider = loadEnvValue('GIADA_VOICE_PROVIDER') || 'gemini';
+  if (voiceProvider === 'local') {
+    console.log('Checking Ollama (local Luna brain)…');
+    await ensureOllama();
+    console.log('');
+  }
 
   const backendAlreadyRunning = await isUp(healthUrl);
 
