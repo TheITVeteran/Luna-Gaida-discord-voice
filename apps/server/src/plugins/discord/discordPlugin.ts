@@ -47,7 +47,7 @@ import {
   type DiscordImageAttachment,
   type DiscordReactionSummary
 } from './responder.js';
-import { DiscordVoiceBridge } from './voiceBridge.js';
+import { DiscordVoiceBridge, type VoiceSessionInputMode } from './voiceBridge.js';
 import type { UserVoiceMemoryStore } from '../../memory/userVoiceMemory.js';
 import type { LunaLifeStore } from '../../memory/lunaLifeStore.js';
 import { LunaDmInitiativeService } from '../../live/lunaDmInitiativeService.js';
@@ -1061,8 +1061,8 @@ export class DiscordPlugin implements GiadaPlugin {
       }
 
       if (mode === 'join') {
-        await this.joinVoice(interaction.guildId, voiceChannelId);
-        const usePtt = this.config.GIADA_VOICE_PROVIDER === 'local' && this.config.LUNA_VOICE_INPUT_MODE === 'ptt';
+        await this.joinVoice(interaction.guildId, voiceChannelId, 'join');
+        const usePtt = this.config.GIADA_VOICE_PROVIDER === 'local';
         if (usePtt) {
           publishActivity({ level: 'success', title: 'Joined voice channel', detail: 'Push-to-talk controls posted in chat' });
           const pttRow = this.buildPttButtonRow(interaction.guildId, voiceChannelId);
@@ -1114,7 +1114,7 @@ export class DiscordPlugin implements GiadaPlugin {
       return;
     }
 
-    await this.joinVoice(interaction.guildId, voiceChannelId);
+    await this.joinVoice(interaction.guildId, voiceChannelId, 'join');
     const ready = await this.waitForVoiceReady(interaction.guildId, voiceChannelId);
     if (!ready) {
       await this.replyInteraction(interaction, 'Joined voice but the connection is not ready yet. Try `/play` again in a few seconds.');
@@ -1144,6 +1144,9 @@ export class DiscordPlugin implements GiadaPlugin {
 
     await this.replyInteraction(interaction, `Now playing **${title}**.`);
     publishActivity({ level: 'success', title: 'Music playing', detail: title });
+    if (this.config.GIADA_VOICE_PROVIDER === 'local') {
+      await this.postPttControlMessage(interaction.guildId, interaction.channelId, voiceChannelId);
+    }
   }
 
   private async handleSkipInteraction(interaction: ChatInputCommandInteraction) {
@@ -1316,8 +1319,17 @@ export class DiscordPlugin implements GiadaPlugin {
       }
 
       if (mode === 'join') {
-        await this.joinVoice(payload.guild_id, voiceChannelId);
-        await this.updateHttpInteraction(payload, 'Joined voice. I will listen and reply with voice while connected.');
+        await this.joinVoice(payload.guild_id, voiceChannelId, 'join');
+        if (this.config.GIADA_VOICE_PROVIDER === 'local') {
+          const textChannelId = payload.channel_id ?? null;
+          await this.postPttControlMessage(payload.guild_id, textChannelId, voiceChannelId);
+          await this.updateHttpInteraction(
+            payload,
+            'Joined voice. Use **Start Recording** while you speak, then **Send Message** when done.'
+          );
+        } else {
+          await this.updateHttpInteraction(payload, 'Joined voice. I will listen and reply with voice while connected.');
+        }
         return;
       }
     }
@@ -1392,7 +1404,7 @@ export class DiscordPlugin implements GiadaPlugin {
     if (humanMembers <= 0) {
       return;
     }
-    await this.joinVoice(guildId, channelId);
+    await this.joinVoice(guildId, channelId, 'watch');
   }
 
   private scheduleLeaveVoiceIfEmpty(guildId: string, channelId: string) {
@@ -1442,7 +1454,7 @@ export class DiscordPlugin implements GiadaPlugin {
       return;
     }
 
-    await this.joinVoice(payload.guild_id, voiceChannelId);
+    await this.joinVoice(payload.guild_id, voiceChannelId, 'join');
     const ready = await this.waitForVoiceReady(payload.guild_id, voiceChannelId);
     if (!ready) {
       await this.updateHttpInteraction(payload, 'Joined voice but the connection is not ready yet. Try `/play` again in a few seconds.');
@@ -1541,7 +1553,7 @@ export class DiscordPlugin implements GiadaPlugin {
       return { ok: false, error: 'requester_not_in_voice' };
     }
 
-    await this.joinVoice(guildId, channelId);
+    await this.joinVoice(guildId, channelId, 'join');
     return {
       ok: true,
       channelId,
@@ -1577,7 +1589,13 @@ export class DiscordPlugin implements GiadaPlugin {
     };
   }
 
-  private async joinVoice(guildId: string, channelId: string) {
+  private resolveVoiceInputModeForChannel(guildId: string, channelId: string): VoiceSessionInputMode {
+    const settings = this.settings.get(guildId);
+    return settings.voiceWatchChannelIds.includes(channelId) ? 'watch' : 'join';
+  }
+
+  private async joinVoice(guildId: string, channelId: string, inputMode?: VoiceSessionInputMode) {
+    const sessionMode = inputMode ?? this.resolveVoiceInputModeForChannel(guildId, channelId);
     const guild = this.client?.guilds.cache.get(guildId);
     if (!guild) {
       logger.warn('Cannot join Discord voice channel because guild is not cached', { guildId, channelId });
@@ -1589,6 +1607,7 @@ export class DiscordPlugin implements GiadaPlugin {
       return;
     }
     const voiceBridge = await this.getVoiceBridge(guildId, channelId, botUserId);
+    voiceBridge.setVoiceSessionInputMode(sessionMode);
     await guild.members.fetchMe().catch((error) => {
       logger.warn('Could not fetch Discord bot guild member before joining voice', {
         guildId,
@@ -1693,7 +1712,7 @@ export class DiscordPlugin implements GiadaPlugin {
     const timer = setTimeout(() => {
       this.voiceRejoinTimers.delete(key);
       if (this.countHumanVoiceMembers(guildId, channelId) > 0) {
-        void this.joinVoice(guildId, channelId);
+        void this.joinVoice(guildId, channelId, this.resolveVoiceInputModeForChannel(guildId, channelId));
       }
     }, delayMs);
     this.voiceRejoinTimers.set(key, timer);
@@ -2462,7 +2481,11 @@ export class DiscordPlugin implements GiadaPlugin {
   }
 
   private async postPttControlMessage(guildId: string, textChannelId: string | null, voiceChannelId: string) {
-    if (!textChannelId || this.config.GIADA_VOICE_PROVIDER !== 'local' || this.config.LUNA_VOICE_INPUT_MODE !== 'ptt') {
+    if (!textChannelId || this.config.GIADA_VOICE_PROVIDER !== 'local') {
+      return;
+    }
+    const bridge = this.voiceBridges.get(voiceBridgeKey(guildId, voiceChannelId));
+    if (!bridge?.isPttSession()) {
       return;
     }
     const guild = this.client?.guilds.cache.get(guildId);
@@ -2621,9 +2644,9 @@ export class DiscordPlugin implements GiadaPlugin {
       '`/stop` - stop music and clear the queue.',
       '`/giada listen mode:here` - watch this text channel and reply when it makes sense.',
       '`/giada listen mode:off` - stop watching this text channel.',
-      '`/giada voice mode:watch` - watch your current voice channel and auto-join when people enter. One voice channel can be active per server.',
+      '`/giada voice mode:watch` - watch your voice channel; Luna auto-joins, listens freely, vibe-checks, and may speak with TTS.',
       '`/giada voice mode:off` - disable watching for the active or selected voice channel.',
-      '`/giada voice mode:join` - join your current voice channel now.',
+      '`/giada voice mode:join` - join now. Push-to-talk only — Luna waits for Start Recording / Send Message; no vibe checks.',
       '`/giada status` - show current Discord settings.',
       '`/giada authorize user:@user` - allow a user to run Giada commands. Administrator or owner only.',
       '`/giada deauthorize user:@user` - remove command authorization. Administrator or owner only.'

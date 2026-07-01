@@ -15,6 +15,8 @@ export interface LunaInitiativeHost {
   getParticipants(): VoiceCallParticipant[];
   isConversationActive?(): boolean;
   listenToRoomConversation?(durationSec: number): Promise<RoomOverheardLine[]>;
+  /** When false, Luna will not vibe-check or speak unprompted (e.g. Discord join / PTT sessions). */
+  allowsAutonomousReachOut?(): boolean;
 }
 
 export const LUNA_INITIATIVE_JSON_SCHEMA = {

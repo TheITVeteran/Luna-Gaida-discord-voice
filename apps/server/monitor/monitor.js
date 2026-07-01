@@ -320,7 +320,7 @@ async function refreshStatus() {
 
     if (bridge?.attached) {
       document.getElementById('voice-state').innerHTML = `<strong>Voice:</strong> in channel (${escapeHtml(bridge.connectionStatus ?? 'unknown')})`;
-      document.getElementById('voice-mode').innerHTML = `<strong>Mode:</strong> ${escapeHtml(bridge.voiceInputMode ?? 'auto')}${bridge.pttRecording ? ' · recording' : ''}`;
+      document.getElementById('voice-mode').innerHTML = `<strong>Mode:</strong> ${escapeHtml(bridge.voiceSessionMode ?? 'join')} · ${escapeHtml(bridge.voiceInputMode ?? 'auto')}${bridge.pttRecording ? ' · recording' : ''}`;
       document.getElementById('voice-diag').innerHTML = `<strong>Last heard:</strong> ${bridge.lastSpeakingAt ? formatTime(bridge.lastSpeakingAt) : '—'} (${bridge.speakingStarts ?? 0} turns)`;
       document.getElementById('voice-out').innerHTML = `<strong>Last spoke:</strong> ${bridge.lastDiscordWriteAt ? formatTime(bridge.lastDiscordWriteAt) : '—'}`;
       document.getElementById('last-error').innerHTML = `<strong>Last error:</strong> ${bridge.lastError ? escapeHtml(bridge.lastError) : 'none'}`;

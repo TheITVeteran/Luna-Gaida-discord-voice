@@ -52,6 +52,8 @@ const MIXER_FRAME_BYTES = DISCORD_RATE * DISCORD_CHANNELS * 2 * MIXER_FRAME_MS /
 const MIXER_IDLE_END_MS = 450;
 const ASSISTANT_DUCK_HOLD_MS = 650;
 
+export type VoiceSessionInputMode = 'watch' | 'join';
+
 interface DiscordMusicStatus {
   state: 'idle' | 'searching' | 'playing' | 'paused' | 'stopping' | 'error';
   title: string | null;
@@ -142,6 +144,7 @@ export class DiscordVoiceBridge implements MusicController, VoiceController {
     silenceTimer: ReturnType<typeof setTimeout> | null;
   }>();
   private pttUiListener: ((phase: 'idle' | 'recording' | 'processing', detail?: string) => void) | null = null;
+  private voiceSessionInputMode: VoiceSessionInputMode = 'join';
   private activeTurnUserId: string | null = null;
   private inputQueue: Promise<void> = Promise.resolve();
   private readonly pendingVoiceTextMessages: Array<{ authorName: string; text: string }> = [];
@@ -261,7 +264,8 @@ export class DiscordVoiceBridge implements MusicController, VoiceController {
         getGuildId: () => this.guildId,
         getParticipants: () => this.listVoiceParticipants(),
         isConversationActive: () => this.isConversationActive(),
-        listenToRoomConversation: (durationSec) => this.listenToRoomConversation(durationSec)
+        listenToRoomConversation: (durationSec) => this.listenToRoomConversation(durationSec),
+        allowsAutonomousReachOut: () => this.voiceSessionInputMode === 'watch'
       });
     } else {
       this.live = new LiveSessionManager(config, memory, personality, {
@@ -334,7 +338,8 @@ export class DiscordVoiceBridge implements MusicController, VoiceController {
       activeInputUsers: this.activeInputUsers.size,
       pttRecording: Boolean(pttUserId),
       pttUserId,
-      voiceInputMode: this.isPttMode() ? 'ptt' : 'auto',
+      voiceInputMode: this.isPttSession() ? 'ptt' : 'auto',
+      voiceSessionMode: this.voiceSessionInputMode,
       voiceChanger: this.voiceChanger.getStatus(),
       music: this.getMusicStatus()
     };
@@ -359,6 +364,9 @@ export class DiscordVoiceBridge implements MusicController, VoiceController {
   }
 
   async listenToRoomConversation(durationSec: number) {
+    if (this.isPttSession()) {
+      return [];
+    }
     if (this.destroyed || !this.connection || !(this.live instanceof LocalVoiceSessionManager)) {
       return [];
     }
@@ -386,7 +394,7 @@ export class DiscordVoiceBridge implements MusicController, VoiceController {
       if (person.userId === this.botUserId) {
         continue;
       }
-      this.ensureUserCapture(this.connection, person.userId);
+      this.ensureUserCapture(this.connection, person.userId, { forRoomListen: true });
     }
 
     publishActivity({
@@ -404,6 +412,7 @@ export class DiscordVoiceBridge implements MusicController, VoiceController {
 
     this.roomListenActive = false;
     this.roomListenByUser.clear();
+    this.teardownAutoCaptures();
     return [...this.roomListenLines];
   }
 
@@ -420,7 +429,10 @@ export class DiscordVoiceBridge implements MusicController, VoiceController {
     }
 
     let state = this.userCaptures.get(userId);
-    if (!state) {
+    if (state?.mode !== 'ptt') {
+      if (state) {
+        this.teardownUserCapture(userId);
+      }
       this.setupUserCapture(this.connection, userId, 'ptt');
       state = this.userCaptures.get(userId);
     }
@@ -475,8 +487,30 @@ export class DiscordVoiceBridge implements MusicController, VoiceController {
     this.pttUiListener = listener;
   }
 
+  setVoiceSessionInputMode(mode: VoiceSessionInputMode) {
+    if (this.voiceSessionInputMode === mode) {
+      return;
+    }
+    this.voiceSessionInputMode = mode;
+    if (mode === 'join') {
+      this.teardownAutoCaptures();
+    }
+    if (this.live instanceof LocalVoiceSessionManager) {
+      this.live.refreshAutonomousReachOut();
+    }
+  }
+
+  getVoiceSessionInputMode() {
+    return this.voiceSessionInputMode;
+  }
+
+  /** Join sessions use push-to-talk; watch sessions listen freely. */
+  isPttSession() {
+    return this.config.GIADA_VOICE_PROVIDER === 'local' && this.voiceSessionInputMode === 'join';
+  }
+
   private isPttMode() {
-    return this.config.GIADA_VOICE_PROVIDER === 'local' && this.config.LUNA_VOICE_INPUT_MODE === 'ptt';
+    return this.isPttSession();
   }
 
   destroy() {
@@ -567,6 +601,9 @@ export class DiscordVoiceBridge implements MusicController, VoiceController {
   }
 
   speakTextChatMessage(authorName: string, text: string) {
+    if (this.isPttSession()) {
+      return;
+    }
     const normalized = text.replace(/\s+/g, ' ').trim();
     if (!normalized || this.destroyed) {
       return;
@@ -698,7 +735,10 @@ export class DiscordVoiceBridge implements MusicController, VoiceController {
     this.udpDiagnosticsHandler = null;
   }
 
-  private ensureUserCapture(connection: VoiceConnection, userId: string) {
+  private ensureUserCapture(connection: VoiceConnection, userId: string, options?: { forRoomListen?: boolean }) {
+    if (this.isPttMode() && !options?.forRoomListen) {
+      return;
+    }
     if (!this.userCaptures.has(userId)) {
       this.setupUserCapture(connection, userId, 'auto');
     }
@@ -775,6 +815,10 @@ export class DiscordVoiceBridge implements MusicController, VoiceController {
         return;
       }
 
+      if (this.isPttMode()) {
+        return;
+      }
+
       const rms = measurePcmRms(pcm16k);
       const isSpeech = rms >= PCM_SPEECH_RMS_THRESHOLD;
       if (isSpeech) {
@@ -824,6 +868,15 @@ export class DiscordVoiceBridge implements MusicController, VoiceController {
     opusStream.once('close', () => {
       this.teardownUserCapture(userId);
     });
+  }
+
+  private teardownAutoCaptures() {
+    for (const userId of [...this.userCaptures.keys()]) {
+      const state = this.userCaptures.get(userId);
+      if (state?.mode === 'auto') {
+        this.teardownUserCapture(userId);
+      }
+    }
   }
 
   private teardownUserCapture(userId: string) {

@@ -214,19 +214,34 @@ export class LocalVoiceSessionManager {
 
   setInitiativeHost(host: LunaInitiativeHost | null) {
     this.initiativeHost = host;
-    if (host?.isChannelAttached() && this.config.lunaAutonomousReachOut && !this.closed) {
-      this.scheduleInitiative();
-    } else {
-      this.clearInitiativeTimer();
-    }
+    this.refreshAutonomousReachOut();
   }
 
   notifyVoiceChannelAttached() {
     this.lastSpeechAt = Date.now();
-    if (this.config.lunaAutonomousReachOut && !this.closed) {
+    this.refreshAutonomousReachOut();
+  }
+
+  refreshAutonomousReachOut() {
+    if (this.autonomousReachOutAllowed() && this.initiativeHost?.isChannelAttached() && !this.closed) {
       this.scheduleInitiative();
       this.scheduleJoinInitiative();
+      return;
     }
+    this.bumpInitiativeGeneration();
+    this.clearInitiativeTimer();
+    this.clearJoinInitiativeTimer();
+  }
+
+  private autonomousReachOutAllowed() {
+    if (!this.config.lunaAutonomousReachOut || this.closed) {
+      return false;
+    }
+    const host = this.initiativeHost;
+    if (host?.allowsAutonomousReachOut && !host.allowsAutonomousReachOut()) {
+      return false;
+    }
+    return true;
   }
 
   notifyVoiceChannelDetached() {
@@ -287,7 +302,7 @@ export class LocalVoiceSessionManager {
   }
 
   private scheduleJoinInitiative() {
-    if (!this.config.lunaAutonomousReachOut || this.closed) {
+    if (!this.autonomousReachOutAllowed()) {
       return;
     }
     this.clearJoinInitiativeTimer();
@@ -311,13 +326,13 @@ export class LocalVoiceSessionManager {
   private bumpInitiativeGeneration() {
     this.initiativeGeneration += 1;
     this.clearInitiativeTimer();
-    if (this.config.lunaAutonomousReachOut && this.initiativeHost?.isChannelAttached() && !this.closed) {
+    if (this.autonomousReachOutAllowed() && this.initiativeHost?.isChannelAttached() && !this.closed) {
       this.scheduleInitiative();
     }
   }
 
   private scheduleInitiative() {
-    if (!this.config.lunaAutonomousReachOut || this.closed || !this.initiativeHost?.isChannelAttached()) {
+    if (!this.autonomousReachOutAllowed() || !this.initiativeHost?.isChannelAttached()) {
       return;
     }
     this.clearInitiativeTimer();
@@ -332,7 +347,7 @@ export class LocalVoiceSessionManager {
   }
 
   private canOfferInitiative() {
-    if (!this.config.lunaAutonomousReachOut || this.closed || this.processing || this.capturing || this.vibeListening) {
+    if (!this.autonomousReachOutAllowed() || this.processing || this.capturing || this.vibeListening) {
       return false;
     }
     const host = this.initiativeHost;
@@ -354,7 +369,7 @@ export class LocalVoiceSessionManager {
   }
 
   private canOfferJoinInitiative() {
-    if (!this.config.lunaAutonomousReachOut || this.closed || this.processing || this.capturing) {
+    if (!this.autonomousReachOutAllowed() || this.processing || this.capturing) {
       return false;
     }
     const host = this.initiativeHost;
