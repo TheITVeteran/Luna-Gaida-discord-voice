@@ -93,7 +93,7 @@ export function planInterestBrowse(
     .map((record) => inferCategoryId(record.query ?? '', record.title))
     .filter(Boolean) as string[];
 
-  let best = INTEREST_BROWSE_CATEGORIES[0]!;
+  let best: (typeof INTEREST_BROWSE_CATEGORIES)[number] = INTEREST_BROWSE_CATEGORIES[0]!;
   let bestScore = -Infinity;
   for (const category of INTEREST_BROWSE_CATEGORIES) {
     const query = category.query(year);

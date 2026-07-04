@@ -1,11 +1,13 @@
-import { WebSocketServer, type WebSocket } from 'ws';
+import { WebSocketServer, WebSocket } from 'ws';
 import type { IncomingMessage, Server } from 'node:http';
 import { z } from 'zod';
 import type { LiveSurface } from '../live/liveSession.js';
 import type { LiveClientEvent, LiveInputEvent } from '../live/liveSession.js';
 import { logger } from '../logging/logger.js';
-import { isLunaElectronAudioMuted } from '../live/lunaTtsOutput.js';
+import { isLunaElectronAudioMuted, isMonitorTtsEnabled } from '../live/lunaTtsOutput.js';
 import { setAvatarBroadcaster } from './avatarBroadcast.js';
+
+type AvatarSocketRole = 'avatar' | 'monitor' | 'live';
 
 const realtimeSurfaceSchema = z.enum(['app', 'browser']).optional();
 const clientEventSchema = z.discriminatedUnion('type', [
@@ -43,6 +45,7 @@ export function attachRealtimeServer(
 ) {
   const wss = new WebSocketServer({ server, path: '/realtime' });
   const sockets = new Map<WebSocket, RealtimeContext>();
+  const socketRoles = new Map<WebSocket, AvatarSocketRole>();
   const avatarOnlySockets = new Set<WebSocket>();
   const liveContexts = new Map<RealtimeContext, RealtimeSession>();
   const browserLive = new Map<WebSocket, RealtimeSession>();
@@ -84,9 +87,14 @@ export function attachRealtimeServer(
   }>) => {
     for (const [socket, socketContext] of sockets) {
       if (socketContext !== 'app') continue;
-      if (socket.readyState === socket.OPEN) {
-        socket.send(JSON.stringify(event));
+      if (socket.readyState !== WebSocket.OPEN) continue;
+      if (event.type === 'audio') {
+        const role = socketRoles.get(socket) ?? 'live';
+        if (isMonitorTtsEnabled() && role !== 'monitor') {
+          continue;
+        }
       }
+      socket.send(JSON.stringify(event));
     }
   };
   setAvatarBroadcaster(broadcastAvatarToApp);
@@ -161,6 +169,7 @@ export function attachRealtimeServer(
           const avatarOnly = parsed.role === 'avatar' || parsed.role === 'monitor';
           if (avatarOnly) {
             avatarOnlySockets.add(socket);
+            socketRoles.set(socket, parsed.role === 'monitor' ? 'monitor' : 'avatar');
             const syncReason = parsed.role === 'monitor' ? 'monitor_sync' : 'avatar_sync';
             socket.send(JSON.stringify({ type: 'status', status: 'connected', reason: syncReason }));
             socket.send(JSON.stringify({ type: 'avatar.state', payload: { state: 'idle' } }));
@@ -171,6 +180,7 @@ export function attachRealtimeServer(
           }
 
           avatarOnlySockets.delete(socket);
+          socketRoles.set(socket, 'live');
           currentLive()?.emitCurrentStatus();
           void currentLive()?.connect(toLiveSurface(context));
         } else if (parsed.type === 'disconnect') {
@@ -214,6 +224,7 @@ export function attachRealtimeServer(
     socket.on('close', () => {
       clearInterval(heartbeat);
       avatarOnlySockets.delete(socket);
+      socketRoles.delete(socket);
       sockets.delete(socket);
       browserLive.get(socket)?.dispose();
       browserLive.delete(socket);

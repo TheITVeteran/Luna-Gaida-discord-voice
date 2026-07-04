@@ -14,12 +14,12 @@ export interface LunaResearchInput {
 }
 
 export interface LunaResearchOptions {
-  purpose?: LunaResearchPurpose;
-  excludeUrls?: string[];
-  excludeKeywords?: string[];
-  preferDigest?: boolean;
-  deep?: boolean;
-  userQuestion?: string;
+  purpose?: LunaResearchPurpose | undefined;
+  excludeUrls?: string[] | undefined;
+  excludeKeywords?: string[] | undefined;
+  preferDigest?: boolean | undefined;
+  deep?: boolean | undefined;
+  userQuestion?: string | undefined;
 }
 
 export interface LunaResearchFinding {
@@ -374,13 +374,15 @@ export function formatResearchFindingBlock(finding: LunaResearchFinding, userQue
       'Answer that question directly using the article excerpts below. Give specific facts, numbers, names, and dates. Do not reply with only headlines, link lists, or "here are some results".'
     );
   }
-  lines.push(
-    `Title: ${finding.title}`,
-    finding.query ? `Query: ${finding.query}` : null,
-    finding.url ? `Primary source: ${finding.url}` : null,
-    `Article excerpts:\n${finding.summary}`
-  );
-  return lines.filter(Boolean).join('\n');
+  lines.push(`Title: ${finding.title}`);
+  if (finding.query) {
+    lines.push(`Query: ${finding.query}`);
+  }
+  if (finding.url) {
+    lines.push(`Primary source: ${finding.url}`);
+  }
+  lines.push(`Article excerpts:\n${finding.summary}`);
+  return lines.join('\n');
 }
 
 export function wrapQueryForConversation(query: string, purpose: LunaResearchPurpose = 'conversation') {

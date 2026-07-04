@@ -3,7 +3,7 @@ import { logger } from '../../logging/logger.js';
 import type { Part } from '@google/genai';
 import type { DiscordImageAttachment } from './responder.js';
 
-type NvidiaConfig = AppConfig & { nvidiaApiKey?: string };
+type NvidiaConfig = AppConfig & { nvidiaApiKey?: string | undefined };
 
 interface NvidiaChatCompletionResponse {
   choices?: Array<{

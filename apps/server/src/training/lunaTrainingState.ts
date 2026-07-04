@@ -31,9 +31,13 @@ export function buildLunaTrainingState(input: {
   factsSummary?: string | null;
   conceptsSummary?: string | null;
   lifeNarrative?: string | null;
+  selfConceptNarrative?: string | null;
+  goalsNarrative?: string | null;
+  opinionsNarrative?: string | null;
+  archetype?: string | null;
   hoursSinceContact?: number | null;
   absenceNote?: string | null;
-  recentTurns?: Array<ConversationTurn | LunaTrainingTurn>;
+  recentTurns?: Array<ConversationTurn | LunaTrainingTurn> | undefined;
   researchSnippet?: string | null;
 }): LunaTrainingState {
   const relationshipBullets = bulletsFromText(input.relationship, 6);
@@ -50,6 +54,10 @@ export function buildLunaTrainingState(input: {
     facts: bulletsFromText(input.factsSummary, 8),
     concepts: bulletsFromText(input.conceptsSummary, 6),
     life: bulletsFromText(input.lifeNarrative, 10),
+    selfConcept: bulletsFromText(input.selfConceptNarrative, 10),
+    goals: bulletsFromText(input.goalsNarrative, 10),
+    opinions: bulletsFromText(input.opinionsNarrative, 12),
+    archetype: input.archetype?.trim() || null,
     hoursSinceContact: input.hoursSinceContact ?? null,
     absenceNote: input.absenceNote?.trim() || null,
     recentTurns,
@@ -81,6 +89,21 @@ export function formatLunaStateSystemContent(state: LunaTrainingState) {
   if (state.life.length) {
     lines.push('life:');
     for (const bullet of state.life) lines.push(`- ${bullet}`);
+  }
+  if (state.selfConcept?.length) {
+    lines.push('self_concept:');
+    for (const bullet of state.selfConcept) lines.push(`- ${bullet}`);
+  }
+  if (state.goals?.length) {
+    lines.push('goals:');
+    for (const bullet of state.goals) lines.push(`- ${bullet}`);
+  }
+  if (state.opinions?.length) {
+    lines.push('opinions:');
+    for (const bullet of state.opinions) lines.push(`- ${bullet}`);
+  }
+  if (state.archetype) {
+    lines.push(`archetype: ${state.archetype}`);
   }
   if (state.hoursSinceContact != null && Number.isFinite(state.hoursSinceContact)) {
     lines.push(`hours_since_contact: ${Math.round(state.hoursSinceContact * 10) / 10}`);

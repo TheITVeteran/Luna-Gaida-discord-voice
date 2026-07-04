@@ -3,6 +3,11 @@ import type { PersonalityInstructionProvider } from '../personality/service.js';
 import { publishActivity } from '../monitor/activityFeed.js';
 import { logger } from '../logging/logger.js';
 import { LiveChatBrain } from './liveChatBrain.js';
+import {
+  formatLiveChatBatchPrompt,
+  liveChatBatchFlushDelayMs,
+  uniqueViewerNames
+} from './liveChatBatch.js';
 import { TwitchChatClient } from './twitchChatClient.js';
 import { YoutubeChatWorker } from './youtubeChatWorker.js';
 
@@ -24,8 +29,10 @@ export class LiveChatCoordinator {
   private readonly twitch: TwitchChatClient;
   private readonly youtube: YoutubeChatWorker;
   private readonly seenIds = new Set<string>();
-  private readonly inFlight = new Set<string>();
-  private lastReplyAt = 0;
+  private readonly inbox: IncomingChatMessage[] = [];
+  private replyChain: Promise<void> = Promise.resolve();
+  private flushTimer: ReturnType<typeof setTimeout> | null = null;
+  private lastReplyEndedAt = 0;
   private started = false;
   private youtubeRestartTimer: ReturnType<typeof setTimeout> | null = null;
   private warnedLiveTts = false;
@@ -66,6 +73,10 @@ export class LiveChatCoordinator {
 
   async stop() {
     this.started = false;
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
     if (this.youtubeRestartTimer) {
       clearTimeout(this.youtubeRestartTimer);
       this.youtubeRestartTimer = null;
@@ -99,7 +110,7 @@ export class LiveChatCoordinator {
     }
   }
 
-  private async handleMessage(message: IncomingChatMessage) {
+  private handleMessage(message: IncomingChatMessage) {
     if (!message.id || this.seenIds.has(message.id)) return;
     this.seenIds.add(message.id);
     if (this.seenIds.size > 5000) {
@@ -137,66 +148,121 @@ export class LiveChatCoordinator {
       return;
     }
 
-    const key = `${message.platform}:${message.id}`;
-    if (this.inFlight.has(key)) return;
-    this.inFlight.add(key);
+    this.inbox.push(message);
+    this.scheduleInboxFlush();
+  }
 
+  private scheduleInboxFlush() {
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+    }
+    const delay = liveChatBatchFlushDelayMs(
+      this.inbox.length,
+      this.config.lunaLiveChatBatchMs,
+      this.config.lunaLiveChatMaxBatch
+    );
+    this.flushTimer = setTimeout(() => {
+      this.flushTimer = null;
+      this.flushInbox();
+    }, delay);
+    this.flushTimer.unref?.();
+  }
+
+  private flushInbox() {
+    if (!this.inbox.length) return;
+
+    const batch = this.inbox.splice(0, this.config.lunaLiveChatMaxBatch);
+    if (this.inbox.length) {
+      this.scheduleInboxFlush();
+    }
+
+    this.replyChain = this.replyChain
+      .then(() => this.processBatch(batch))
+      .catch((error) => {
+        logger.warn('Live chat batch failed', {
+          error: error instanceof Error ? error.message : String(error)
+        });
+      });
+  }
+
+  private async processBatch(batch: IncomingChatMessage[]) {
+    if (!batch.length) return;
+
+    const platform = batch[0]!.platform;
     try {
-      const now = Date.now();
-      const cooldownMs = 1500;
-      if (now - this.lastReplyAt < cooldownMs) {
-        await delay(cooldownMs - (now - this.lastReplyAt));
-      }
+      await this.waitForReplyGap();
 
-      const reply = await this.brain.generateReply(message.platform, message.author, message.text);
+      const viewerLines = batch.map((message) => ({
+        author: message.author,
+        text: message.text
+      }));
+
+      const reply = batch.length === 1
+        ? await this.brain.generateReply(platform, batch[0]!.author, batch[0]!.text)
+        : await this.brain.generateBatchReply(platform, viewerLines);
+
       if (!reply) {
         logger.warn('Live chat brain returned no reply', {
-          platform: message.platform,
-          author: message.author,
-          text: message.text.slice(0, 120)
+          platform,
+          viewers: uniqueViewerNames(viewerLines),
+          count: batch.length
         });
         return;
       }
 
-      const wantsTts = message.platform === 'youtube'
+      const wantsTts = platform === 'youtube'
         ? this.config.youtubeTts
         : this.config.twitchTts;
       if (wantsTts) {
         const spoke = await this.options.speakTts?.(reply.ttsText, { displayText: reply.displayText }) ?? false;
         if (!spoke && !this.warnedLiveTts) {
           this.warnedLiveTts = true;
-          logger.warn('Live chat TTS skipped', { platform: message.platform });
+          logger.warn('Live chat TTS skipped', { platform });
           publishActivity({
             level: 'warn',
-            title: `${message.platform} TTS unavailable`,
+            title: `${platform} TTS unavailable`,
             detail: 'Reply was generated but could not be spoken. Open Fluffy (Electron) or join Luna to a Discord voice channel.'
           });
         }
       }
 
-      if (message.platform === 'twitch' && this.config.twitchChatReply) {
+      if (platform === 'twitch' && this.config.twitchChatReply) {
         await this.twitch.reply(reply.displayText);
       }
 
-      this.lastReplyAt = Date.now();
+      const names = uniqueViewerNames(viewerLines);
       publishActivity({
         level: 'assistant',
-        title: message.platform === 'youtube' ? 'Luna spoke (YouTube TTS)' : 'Luna spoke (Twitch TTS)',
+        title: batch.length > 1
+          ? `Luna spoke (${platform} · ${batch.length} chatters)`
+          : platform === 'youtube'
+            ? 'Luna spoke (YouTube TTS)'
+            : 'Luna spoke (Twitch TTS)',
         detail: reply.displayText,
         meta: {
-          platform: message.platform,
-          to: message.author,
+          platform,
+          to: names.join(', '),
+          batchSize: batch.length,
           mode: wantsTts ? 'tts' : 'chat',
-          ...(this.config.twitchChatReply && message.platform === 'twitch' ? { twitchChat: true } : {})
+          ...(this.config.twitchChatReply && platform === 'twitch' ? { twitchChat: true } : {})
         }
       });
     } catch (error) {
       logger.warn('Live chat reply failed', {
-        platform: message.platform,
+        platform,
         error: error instanceof Error ? error.message : String(error)
       });
     } finally {
-      this.inFlight.delete(key);
+      this.lastReplyEndedAt = Date.now();
+    }
+  }
+
+  private async waitForReplyGap() {
+    const gapMs = this.config.lunaLiveChatMinGapMs;
+    if (!gapMs || !this.lastReplyEndedAt) return;
+    const elapsed = Date.now() - this.lastReplyEndedAt;
+    if (elapsed < gapMs) {
+      await delay(gapMs - elapsed);
     }
   }
 

@@ -3,10 +3,10 @@ import type { LunaResearchMode } from './lunaResearchRunner.js';
 import { planInterestBrowse } from './interestBrowse.js';
 
 export interface ConversationResearchContext {
-  recentLines?: string[];
-  voiceMemorySummary?: string;
-  displayName?: string;
-  currentMessage?: string;
+  recentLines?: string[] | undefined;
+  voiceMemorySummary?: string | undefined;
+  displayName?: string | undefined;
+  currentMessage?: string | undefined;
 }
 
 const STOP_WORDS = new Set([
@@ -101,12 +101,12 @@ export function enhanceResearchIntent(
   researchStore: LunaResearchStore | undefined
 ): {
   mode: LunaResearchMode;
-  query?: string;
-  url?: string;
-  excludeKeywords?: string[];
-  excludeUrls?: string[];
-  preferDigest?: boolean;
-  deep?: boolean;
+  query?: string | undefined;
+  url?: string | undefined;
+  excludeKeywords?: string[] | undefined;
+  excludeUrls?: string[] | undefined;
+  preferDigest?: boolean | undefined;
+  deep?: boolean | undefined;
 } {
   const excludeKeywords = researchStore ? getRecentlyCoveredKeywords(researchStore) : [];
   const excludeUrls = researchStore?.recent(8).map((record) => record.url).filter(Boolean) as string[] ?? [];
@@ -144,7 +144,7 @@ const NEWSISH_RE = /\b(?:news|headlines?|latest|current)\b/i;
 export function detectConversationFollowUpResearch(
   userText: string,
   context: ConversationResearchContext
-): { mode: LunaResearchMode; query: string } | null {
+): { mode: LunaResearchMode; query: string; deep?: boolean } | null {
   const text = userText.trim();
   if (!text || text.length < 8) return null;
 

@@ -1,6 +1,12 @@
 import type { ConversationTurn } from '../live/conversationHistory.js';
 import type { OllamaTextClient } from '../providers/ollamaText.js';
 import { inferBondTier, relationshipEscalationRules, userSignalsRepairAttempt } from './relationshipBond.js';
+import {
+  archetypeEscalationHint,
+  inferArchetypeFromRelationship,
+  parseArchetypeFromBullets
+} from './relationshipArchetype.js';
+import { analyzeUserSocialTone } from './socialTone.js';
 import { normalizeBulletSummary, type UserVoiceMemoryStore } from './userVoiceMemory.js';
 import { logger } from '../logging/logger.js';
 
@@ -25,15 +31,34 @@ export async function updateUserRelationship(input: {
 }) {
   const subject = input.displayName.trim() || 'this user';
   const tier = inferBondTier(input.existingRelationship);
+  const socialTone = analyzeUserSocialTone({
+    userSaid: input.userSaid,
+    relationship: input.existingRelationship,
+    recentUserLines: (input.recentHistory ?? [])
+      .filter((turn) => turn.role === 'user')
+      .map((turn) => turn.text)
+      .slice(-4)
+  });
   const system = [
     'You are Luna deciding how YOU feel about one Discord voice caller — your own free will.',
     `Reflect only on your relationship with ${subject}, not facts about their job or pets.`,
     relationshipEscalationRules(input.existingRelationship),
+    archetypeEscalationHint(inferArchetypeFromRelationship(input.existingRelationship)),
     'Rules:',
     '- Output ONLY bullet lines, each starting with "- "',
     '- Max 6 bullets, max 16 words per bullet',
     '- First bullet: your CURRENT overall stance right now (stranger / acquaintance / warming / likes them / close / cooling off / annoyed / hostile / fed up / softening / forgiving)',
-    '- Say what they did in THIS exchange that shifted your mood — respect, rudeness, boredom, charm, lies, kindness, baiting, disrespect, apology, repair',
+    '- Say what they did in THIS exchange that shifted your mood — respect, rudeness, boredom, charm, lies, kindness, baiting, disrespect, apology, repair, joking, venting',
+    '- Distinguish playful teasing (lol, jk, banter with someone you like) from genuine hostility — do NOT cool the bond over obvious jokes',
+    socialTone.intent === 'playful_teasing'
+      ? '- This turn reads as playful teasing — keep or improve warmth; note the banter, do not treat it as an attack'
+      : null,
+    socialTone.intent === 'genuine_hostility'
+      ? '- This turn reads as genuine hostility — you may cool off, snap, or note disrespect if warranted'
+      : null,
+    socialTone.intent === 'venting' || socialTone.intent === 'support_seeking'
+      ? '- They seem stressed or needing support — empathy is appropriate; do not punish vulnerability as rudeness'
+      : null,
     '- Bonds go BOTH ways: people can earn warmth OR lose it. Note cooling off, snapping, or ragebaiting them if they deserved it',
     '- Bonds can also REPAIR: sincere apologies and changed behavior should move you back toward neutral or warmth — one step at a time',
     '- Romance and heavy flirting are earned slowly. One friendly chat does not create love.',
@@ -54,6 +79,9 @@ export async function updateUserRelationship(input: {
     `Caller: ${subject}`,
     `Your current feelings about them:\n${input.existingRelationship?.trim() || '(still forming an opinion — default curious but not committed)'}`,
     repairAttempt ? 'Signal: they may be apologizing or trying to repair things this turn — weigh that honestly.' : null,
+    socialTone.intent !== 'neutral'
+      ? `Social tone read: ${socialTone.intent.replace(/_/g, ' ')} (${socialTone.confidence}). ${socialTone.empathyCue ?? ''}`.trim()
+      : null,
     input.hoursSinceLastContact != null && input.hoursSinceLastContact >= 3
       ? `They were away for about ${Math.round(input.hoursSinceLastContact)} hours before this message — factor that into whether you noticed or missed them.`
       : null,
@@ -79,10 +107,14 @@ export async function updateUserRelationship(input: {
   }
 
   input.store.saveRelationship(input.guildId, input.userId, input.displayName, relationship);
+  const archetype = parseArchetypeFromBullets(relationship)
+    ?? inferArchetypeFromRelationship(relationship);
+  input.store.saveArchetype(input.guildId, input.userId, input.displayName, archetype);
   logger.info('Updated Luna relationship with caller', {
     guildId: input.guildId,
     userId: input.userId,
-    bullets: relationship.split('\n').length
+    bullets: relationship.split('\n').length,
+    archetype
   });
   return relationship;
 }

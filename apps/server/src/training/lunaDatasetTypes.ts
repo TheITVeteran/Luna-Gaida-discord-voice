@@ -15,6 +15,10 @@ export const lunaTrainingStateSchema = z.object({
   life: z.array(z.string()),
   hoursSinceContact: z.number().nullable(),
   absenceNote: z.string().nullable(),
+  selfConcept: z.array(z.string()).optional(),
+  goals: z.array(z.string()).optional(),
+  opinions: z.array(z.string()).optional(),
+  archetype: z.string().nullable().optional(),
   recentTurns: z.array(lunaTrainingTurnSchema),
   researchSnippet: z.string().nullable().optional(),
 });

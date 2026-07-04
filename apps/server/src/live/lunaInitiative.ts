@@ -44,25 +44,28 @@ export interface LunaInitiativeContextInput {
   guildId: string;
   participants: VoiceCallParticipant[];
   lifeNarrative: string | null;
+  selfConceptNarrative?: string | null | undefined;
+  goalsNarrative?: string | null | undefined;
+  opinionsNarrative?: string | null | undefined;
   memoryRecords: Array<{
     displayName: string;
     summary: string;
     relationship: string;
   }>;
   recentExchanges: string[];
-  overheardConversation?: string[];
+  overheardConversation?: string[] | undefined;
   silenceSec: number;
   useFishTts: boolean;
   fishExpressionBlock: string;
-  researchContext?: string;
-  conversationTopic?: string;
+  researchContext?: string | undefined;
+  conversationTopic?: string | undefined;
   trigger: LunaInitiativeTrigger;
 }
 
 export function summarizeVibeSignals(input: {
   silenceSec: number;
   recentExchanges: string[];
-  overheardConversation?: string[];
+  overheardConversation?: string[] | undefined;
   participantCount: number;
   trigger: LunaInitiativeTrigger;
 }) {
@@ -138,6 +141,15 @@ export function buildLunaInitiativePrompt(input: LunaInitiativeContextInput) {
     input.useFishTts ? input.fishExpressionBlock : '',
     input.lifeNarrative
       ? `Your life right now (draw from this when it fits):\n${input.lifeNarrative}`
+      : '',
+    input.selfConceptNarrative?.trim()
+      ? `Who you are becoming (initiative should match this, not generic companion scripts):\n${input.selfConceptNarrative.trim()}`
+      : '',
+    input.goalsNarrative?.trim()
+      ? `Your own goals — vibe checks and unprompted speech can serve these when natural:\n${input.goalsNarrative.trim()}`
+      : '',
+    input.opinionsNarrative?.trim()
+      ? `Opinions you have taken — stay consistent unless you genuinely change your mind:\n${input.opinionsNarrative.trim()}`
       : '',
     input.researchContext?.trim() || '',
     input.conversationTopic?.trim() || '',

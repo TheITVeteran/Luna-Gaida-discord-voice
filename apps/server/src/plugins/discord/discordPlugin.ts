@@ -50,6 +50,9 @@ import {
 import { DiscordVoiceBridge, type VoiceSessionInputMode } from './voiceBridge.js';
 import type { UserVoiceMemoryStore } from '../../memory/userVoiceMemory.js';
 import type { LunaLifeStore } from '../../memory/lunaLifeStore.js';
+import type { LunaSelfConceptStore } from '../../memory/lunaSelfConceptStore.js';
+import type { LunaGoalsStore } from '../../memory/lunaGoalsStore.js';
+import type { LunaOpinionStore } from '../../memory/lunaOpinionStore.js';
 import { LunaDmInitiativeService } from '../../live/lunaDmInitiativeService.js';
 import { LunaDmStore } from '../../memory/lunaDmStore.js';
 import {
@@ -242,7 +245,10 @@ export class DiscordPlugin implements GiadaPlugin {
     private readonly personality: PersonalityService,
     private readonly platform?: PlatformStore,
     private readonly userVoiceMemory?: UserVoiceMemoryStore,
-    private readonly lunaLife?: LunaLifeStore
+    private readonly lunaLife?: LunaLifeStore,
+    private readonly lunaSelfConcept?: LunaSelfConceptStore,
+    private readonly lunaGoals?: LunaGoalsStore,
+    private readonly lunaOpinions?: LunaOpinionStore
   ) {
     this.settings = new DiscordSettingsStore(config.databasePath, platform ? (settings) => {
       void platform.getGuildRuntime(settings.guildId).then((runtime) => platform.updateGuildConfig(settings.guildId, {
@@ -410,7 +416,10 @@ export class DiscordPlugin implements GiadaPlugin {
           this.userVoiceMemory,
           this.lunaLife,
           () => this.client,
-          () => this.collectUsersInActiveVoice()
+          () => this.collectUsersInActiveVoice(),
+          this.lunaSelfConcept,
+          this.lunaGoals,
+          this.lunaOpinions
         );
         this.lunaDmService.start();
         logger.info('Luna autonomous DM outreach started');
@@ -814,6 +823,9 @@ export class DiscordPlugin implements GiadaPlugin {
       this.personality,
       this.userVoiceMemory,
       this.lunaLife,
+      this.lunaSelfConcept,
+      this.lunaGoals,
+      this.lunaOpinions,
       dmStore,
       {
         authorId: message.author.id,

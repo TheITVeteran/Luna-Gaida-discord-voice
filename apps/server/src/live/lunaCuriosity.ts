@@ -18,6 +18,7 @@ export function buildLunaCuriosityPrompt(input: {
   recentResearchLines: string[];
   recentConversationLines: string[];
   plannedBrowse?: string | null;
+  activeGoals?: string | null;
   rssFeedCount: number;
 }) {
   const categoryList = INTEREST_BROWSE_CATEGORIES
@@ -31,6 +32,9 @@ export function buildLunaCuriosityPrompt(input: {
     'Good browse fuel: AI, gaming, VTubers/streaming, tech, science, movies/anime, fun facts, world news digests, and anything people in recent chat actually care about.',
     `Interest rotation includes: ${categoryList}.`,
     'Prioritize what your friends have been talking about in recent DMs or voice memory.',
+    input.activeGoals?.trim()
+      ? `Your active goals — browsing can serve these when relevant:\n${input.activeGoals.trim()}`
+      : '',
     'Do not autonomously fixate on one geopolitical story, Iran, Trump, or conflict loops unless someone asked about that.',
     'Most cycles you should stay idle. Only explore when you want fresh conversation fuel.',
     input.rssFeedCount

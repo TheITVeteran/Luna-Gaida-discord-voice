@@ -19,6 +19,7 @@ export type RealtimeEvent =
   | { type: 'avatar.expression'; payload: { expression: string; intensity: number; at?: number } }
   | { type: 'avatar.state'; payload: { state: CompanionState } }
   | { type: 'avatar.wardrobe'; payload: { outfit: 'light' | 'dark'; accessories: string[]; motion?: string | null } }
+  | { type: 'avatar.local_audio'; payload: { muted: boolean } }
   | { type: 'avatar.model.change'; payload: { modelName: string } };
 
 export class RealtimeClient extends EventTarget {
@@ -35,7 +36,8 @@ export class RealtimeClient extends EventTarget {
   private screenSharing = false;
   private readonly audioEnabled: boolean;
   private readonly surface: 'app' | 'browser';
-  private readonly role?: 'avatar' | 'monitor' | 'live';
+  private readonly role: 'avatar' | 'monitor' | 'live' | undefined;
+  private localAudioMuted = false;
 
   constructor(options: { audioEnabled?: boolean; surface?: 'app' | 'browser'; role?: 'avatar' | 'monitor' | 'live' } = {}) {
     super();
@@ -101,7 +103,13 @@ export class RealtimeClient extends EventTarget {
     });
     socket.addEventListener('message', (message) => {
       const event = JSON.parse(message.data as string) as RealtimeEvent;
-      if (event.type === 'audio' && this.audioEnabled) {
+      if (event.type === 'avatar.local_audio') {
+        this.localAudioMuted = event.payload.muted;
+        if (event.payload.muted) {
+          this.player.stopQueuedAudio();
+        }
+      }
+      if (event.type === 'audio' && this.audioEnabled && !this.localAudioMuted && this.role !== 'avatar') {
         void this.player.playBase64Pcm(event.data);
       }
       this.dispatchEvent(new CustomEvent<RealtimeEvent>('event', { detail: event }));

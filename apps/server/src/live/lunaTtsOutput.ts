@@ -72,11 +72,14 @@ export function emitLunaTtsAudio(
 
 let discordVoiceBridgeCount = 0;
 let monitorTtsEnabled = false;
-let monitorTtsVolume = 1;
+/** Max PCM gain for monitor OBS capture (4× ≈ +12 dB, clamped to int16). */
+export const MAX_MONITOR_TTS_GAIN = 4;
+let monitorTtsVolume = MAX_MONITOR_TTS_GAIN;
 
-export function setMonitorTtsEnabled(enabled: boolean, volume = 1) {
+export function setMonitorTtsEnabled(enabled: boolean, volume = MAX_MONITOR_TTS_GAIN) {
   monitorTtsEnabled = enabled;
-  monitorTtsVolume = Math.min(4, Math.max(0.1, volume));
+  monitorTtsVolume = Math.min(MAX_MONITOR_TTS_GAIN, Math.max(0.1, volume));
+  refreshAvatarLocalAudioMute();
 }
 
 export function isMonitorTtsEnabled() {
@@ -101,33 +104,32 @@ function scaleDiscordPcm(pcm: Buffer, gain: number) {
 }
 
 export function isLunaElectronAudioMuted() {
-  return discordVoiceBridgeCount > 0;
+  return discordVoiceBridgeCount > 0 || monitorTtsEnabled;
 }
 
 function publishElectronAudioMute(muted: boolean) {
   broadcastAvatarEvent({ type: 'avatar.local_audio', payload: { muted } });
 }
 
-/** Mute Fluffy local playback while Luna speaks through Discord VC (lip sync still runs). */
+function refreshAvatarLocalAudioMute() {
+  publishElectronAudioMute(isLunaElectronAudioMuted());
+}
+
+/** Mute Fluffy local playback while Luna speaks through Discord VC or monitor OBS capture (lip sync still runs). */
 export function setDiscordVoiceBridgeActive(active: boolean) {
   if (active) {
     discordVoiceBridgeCount += 1;
-    if (discordVoiceBridgeCount === 1) {
-      publishElectronAudioMute(true);
-    }
-    return;
+  } else {
+    discordVoiceBridgeCount = Math.max(0, discordVoiceBridgeCount - 1);
   }
-  discordVoiceBridgeCount = Math.max(0, discordVoiceBridgeCount - 1);
-  if (discordVoiceBridgeCount === 0) {
-    publishElectronAudioMute(false);
-  }
+  refreshAvatarLocalAudioMute();
 }
 
 export function broadcastLunaTtsAudio(discordPcm: Buffer) {
   if (!discordPcm.length) return;
   const avatarMuted = isLunaElectronAudioMuted();
   if (avatarMuted && !monitorTtsEnabled) return;
-  const pcm = monitorTtsEnabled && monitorTtsVolume !== 1
+  const pcm = monitorTtsEnabled
     ? scaleDiscordPcm(discordPcm, monitorTtsVolume)
     : discordPcm;
   broadcastAvatarEvent({

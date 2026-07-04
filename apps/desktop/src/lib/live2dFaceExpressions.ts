@@ -105,7 +105,7 @@ interface Live2dModelLike {
   internalModel?: {
     coreModel?: CubismCore;
     motionManager?: {
-      definitions?: Record<string, unknown[]>;
+      definitions?: Partial<Record<string, unknown[]>>;
     };
   };
 }
@@ -147,17 +147,6 @@ function getCoreModel(model: Live2dModelLike | null) {
   return model?.internalModel?.coreModel ?? null;
 }
 
-function writeParams(values: Record<string, number>) {
-  const core = getCoreModel(getModel());
-  if (!core) return;
-  for (const [id, value] of Object.entries(values)) {
-    const index = core.getParameterIndex?.(id);
-    if (index != null && index >= 0) {
-      core.setParameterValueByIndex?.(index, value);
-    }
-  }
-}
-
 function playMotion(model: Live2dModelLike | null, group: string | null | undefined) {
   if (!group || !model?.motion) return;
   const defs = model.internalModel?.motionManager?.definitions?.[group];
@@ -183,6 +172,17 @@ export function createLive2dFaceController(getModel: () => Live2dModelLike | nul
     }
   }
 
+  function writeParamValues(values: Record<string, number>) {
+    const core = getCoreModel(getModel());
+    if (!core) return;
+    for (const [id, value] of Object.entries(values)) {
+      const index = core.getParameterIndex?.(id);
+      if (index != null && index >= 0) {
+        core.setParameterValueByIndex?.(index, value);
+      }
+    }
+  }
+
   function clearTimers() {
     if (fadeTimer) {
       clearInterval(fadeTimer);
@@ -196,11 +196,11 @@ export function createLive2dFaceController(getModel: () => Live2dModelLike | nul
 
   function clearFaceOverlays() {
     const values = Object.fromEntries(FACE_OVERLAY_PARAM_IDS.map((id) => [id, 0]));
-    writeParams(values);
+    writeParamValues(values);
   }
 
   function applyWardrobeParams() {
-    writeParams(buildWardrobeParamValues(wardrobeState));
+    writeParamValues(buildWardrobeParamValues(wardrobeState));
   }
 
   function applyBaseline() {
@@ -262,7 +262,7 @@ export function createLive2dFaceController(getModel: () => Live2dModelLike | nul
       const layer = FACE_OVERLAY_LAYERS[name.toLowerCase()];
       if (layer) values[layer.param] = layer.value * intensity;
     }
-    writeParams(values);
+    writeParamValues(values);
 
     const primary = names[0]?.toLowerCase();
     if (primary) playMotion(getModel(), EXPRESSION_MOTIONS[primary]);

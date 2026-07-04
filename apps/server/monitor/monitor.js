@@ -1,6 +1,9 @@
 const feed = document.getElementById('feed');
 const memoryPanel = document.getElementById('memory-panel');
 const lifePanel = document.getElementById('life-panel');
+const selfConceptPanel = document.getElementById('self-concept-panel');
+const goalsPanel = document.getElementById('goals-panel');
+const opinionsPanel = document.getElementById('opinions-panel');
 const connection = document.getElementById('connection');
 const pttBtn = document.getElementById('ptt-btn');
 const ttsBtn = document.getElementById('tts-btn');
@@ -123,15 +126,17 @@ async function enableTts() {
   try {
     const response = await fetch('/monitor/tts/enable', { method: 'POST' });
     const payload = await response.json();
-    if (payload?.volume != null) {
-      monitorAudio.playbackGain = payload.volume;
+    if (payload?.gain != null) {
+      monitorAudio.playbackGain = 1;
+    } else if (payload?.volume != null) {
+      monitorAudio.playbackGain = 1;
     }
   } catch {
     monitorAudio.playbackGain = 1;
   }
   ttsEnabled = true;
   lunaConversation.classList.remove('hidden');
-  ttsBtn.textContent = 'Luna voice + text enabled (100%)';
+  ttsBtn.textContent = 'Luna voice + text enabled (max volume)';
   ttsBtn.classList.add('enabled');
   ttsBtn.disabled = true;
   connectTtsStream();
@@ -278,6 +283,42 @@ function renderLife(records) {
   `;
 }
 
+function renderSelfConcept(records) {
+  const record = records?.[0];
+  if (!record?.narrative?.trim()) {
+    selfConceptPanel.innerHTML = '<div class="empty">Her sense of self is still forming…</div>';
+    return;
+  }
+  selfConceptPanel.innerHTML = `
+    <time>Updated ${formatTime(record.updatedAt)} · ${record.turnCount ?? 0} reflections</time>
+    <pre>${escapeHtml(record.narrative)}</pre>
+  `;
+}
+
+function renderGoals(records) {
+  const record = records?.[0];
+  if (!record?.goals?.trim()) {
+    goalsPanel.innerHTML = '<div class="empty">No goals yet — she\'ll pick her own…</div>';
+    return;
+  }
+  goalsPanel.innerHTML = `
+    <time>Updated ${formatTime(record.updatedAt)}</time>
+    <pre>${escapeHtml(record.goals)}</pre>
+  `;
+}
+
+function renderOpinions(records) {
+  const record = records?.[0];
+  if (!record?.opinions?.trim()) {
+    opinionsPanel.innerHTML = '<div class="empty">She hasn\'t taken many stances yet…</div>';
+    return;
+  }
+  opinionsPanel.innerHTML = `
+    <time>Updated ${formatTime(record.updatedAt)}</time>
+    <pre>${escapeHtml(record.opinions)}</pre>
+  `;
+}
+
 function renderMemory(users) {
   if (!users?.length) {
     memoryPanel.innerHTML = '<div class="empty">No saved caller notes yet.</div>';
@@ -293,7 +334,7 @@ function renderMemory(users) {
         </div>
       </div>
       <time>Updated ${formatTime(user.updatedAt)}</time>
-      ${user.relationship?.trim() ? `<div class="memory-relationship"><strong>How Luna feels</strong><pre>${escapeHtml(user.relationship)}</pre></div>` : ''}
+      ${user.relationship?.trim() ? `<div class="memory-relationship"><strong>How Luna feels</strong>${user.archetype?.trim() ? `<span class="memory-archetype"> · ${escapeHtml(user.archetype)}</span>` : ''}<pre>${escapeHtml(user.relationship)}</pre></div>` : ''}
       ${user.concepts?.trim() ? `<div class="memory-concepts"><strong>Concepts</strong><pre>${escapeHtml(user.concepts)}</pre></div>` : ''}
       ${user.summary?.trim() ? `<div class="memory-facts"><strong>Facts</strong><pre>${escapeHtml(user.summary)}</pre></div>` : ''}
     </article>
@@ -364,6 +405,9 @@ async function refreshStatus() {
     const payload = await fetch('/monitor/status').then((r) => r.json());
     renderMemory(payload.voiceMemory);
     renderLife(payload.lunaLife);
+    renderSelfConcept(payload.lunaSelfConcept);
+    renderGoals(payload.lunaGoals);
+    renderOpinions(payload.lunaOpinions);
     const discord = payload.discord ?? {};
     const bot = discord.user?.tag ?? 'offline';
     document.getElementById('bot-name').innerHTML = `<strong>Bot:</strong> ${escapeHtml(bot)}`;

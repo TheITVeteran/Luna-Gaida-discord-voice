@@ -49,6 +49,7 @@ const DEFAULT_SPEECH_END_SILENCE_MS = 900;
 const PCM_SPEECH_RMS_THRESHOLD = 320;
 const MIXER_FRAME_MS = 20;
 const MIXER_FRAME_BYTES = DISCORD_RATE * DISCORD_CHANNELS * 2 * MIXER_FRAME_MS / 1000;
+const MUSIC_PREBUFFER_BYTES = MIXER_FRAME_BYTES * 5;
 const MIXER_IDLE_END_MS = 450;
 const ASSISTANT_DUCK_HOLD_MS = 650;
 
@@ -2129,9 +2130,7 @@ class DiscordPcmMixer {
     if (!buffer.length) {
       return;
     }
-    this.musicIngress = this.musicIngress.length
-      ? Buffer.concat([this.musicIngress, buffer])
-      : buffer;
+    this.musicIngress = Buffer.concat([this.musicIngress, buffer]);
 
     const totalBuffered = this.musicQueuedBytes + this.musicIngress.length;
     if (!this.musicPlaybackArmed) {

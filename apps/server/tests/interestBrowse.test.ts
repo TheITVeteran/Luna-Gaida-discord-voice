@@ -12,7 +12,7 @@ describe('interestBrowse', () => {
   });
 
   it('prioritizes user conversation topics', () => {
-    const mockStore = { recent: () => [] } as LunaResearchStore;
+    const mockStore = { recent: () => [] } as unknown as LunaResearchStore;
     const plan = planInterestBrowse(
       ['Alex: I have been playing Elden Ring all week'],
       [],

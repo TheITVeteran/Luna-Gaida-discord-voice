@@ -85,7 +85,10 @@ function shuffleStable<T>(items: T[]) {
   const copy = [...items];
   for (let i = copy.length - 1; i > 0; i -= 1) {
     const j = Math.floor((i + 1) * 0.71) % (i + 1);
-    [copy[i], copy[j]] = [copy[j], copy[i]];
+    const left = copy[i]!;
+    const right = copy[j]!;
+    copy[i] = right;
+    copy[j] = left;
   }
   return copy;
 }

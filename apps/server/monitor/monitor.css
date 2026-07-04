@@ -81,35 +81,30 @@ h1 {
 main {
   display: grid;
   grid-template-columns: 320px 1fr;
-  grid-template-rows: auto auto auto;
   gap: 1rem;
   padding: 1rem;
   max-width: 1200px;
   margin: 0 auto;
+  align-items: start;
 }
 
-main > .card:nth-child(1) {
+.monitor-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
   grid-column: 1;
-  grid-row: 1;
+  min-width: 0;
 }
 
-main > .card:nth-child(2) {
-  grid-column: 1;
-  grid-row: 2;
-}
-
-main > .card:nth-child(3) {
-  grid-column: 1;
-  grid-row: 3;
-}
-
-main > .card:nth-child(4) {
+.monitor-activity {
   grid-column: 2;
-  grid-row: 1 / span 3;
+  grid-row: 1;
+  position: sticky;
+  top: 4.5rem;
 }
 
 .life-panel {
-  max-height: 200px;
+  max-height: 160px;
   overflow-y: auto;
 }
 
@@ -248,15 +243,16 @@ main > .card:nth-child(4) {
 @media (max-width: 800px) {
   main {
     grid-template-columns: 1fr;
-    grid-template-rows: auto;
   }
 
-  main > .card:nth-child(1),
-  main > .card:nth-child(2),
-  main > .card:nth-child(3),
-  main > .card:nth-child(4) {
+  .monitor-sidebar,
+  .monitor-activity {
     grid-column: 1;
     grid-row: auto;
+  }
+
+  .monitor-activity {
+    position: static;
   }
 
   #feed {

@@ -3,9 +3,12 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { listActivity, subscribeActivity, publishActivity } from './activityFeed.js';
-import { setMonitorTtsEnabled } from '../live/lunaTtsOutput.js';
+import { MAX_MONITOR_TTS_GAIN, setMonitorTtsEnabled } from '../live/lunaTtsOutput.js';
 import type { UserVoiceMemoryStore } from '../memory/userVoiceMemory.js';
 import type { LunaLifeStore } from '../memory/lunaLifeStore.js';
+import type { LunaSelfConceptStore } from '../memory/lunaSelfConceptStore.js';
+import type { LunaGoalsStore } from '../memory/lunaGoalsStore.js';
+import type { LunaOpinionStore } from '../memory/lunaOpinionStore.js';
 import { buildCooloffRelationshipNotes } from '../memory/relationshipBond.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -32,7 +35,10 @@ export async function registerMonitorRoutes(
   getDiscordStatus: () => unknown,
   ptt?: MonitorPttHandlers,
   voiceMemory?: UserVoiceMemoryStore,
-  lunaLife?: LunaLifeStore
+  lunaLife?: LunaLifeStore,
+  lunaSelfConcept?: LunaSelfConceptStore,
+  lunaGoals?: LunaGoalsStore,
+  lunaOpinions?: LunaOpinionStore
 ) {
   const dir = monitorDir();
 
@@ -90,11 +96,28 @@ export async function registerMonitorRoutes(
       summary: record.summary,
       relationship: record.relationship,
       concepts: record.concepts,
+      archetype: record.archetype,
       updatedAt: record.updatedAt
     })) ?? [],
     lunaLife: lunaLife?.listAll(5).map((record) => ({
       guildId: record.guildId,
       narrative: record.narrative,
+      updatedAt: record.updatedAt
+    })) ?? [],
+    lunaSelfConcept: lunaSelfConcept?.listAll(5).map((record) => ({
+      guildId: record.guildId,
+      narrative: record.narrative,
+      turnCount: record.turnCount,
+      updatedAt: record.updatedAt
+    })) ?? [],
+    lunaGoals: lunaGoals?.listAll(5).map((record) => ({
+      guildId: record.guildId,
+      goals: record.goals,
+      updatedAt: record.updatedAt
+    })) ?? [],
+    lunaOpinions: lunaOpinions?.listAll(5).map((record) => ({
+      guildId: record.guildId,
+      opinions: record.opinions,
       updatedAt: record.updatedAt
     })) ?? []
   }));
@@ -107,6 +130,7 @@ export async function registerMonitorRoutes(
       summary: record.summary,
       relationship: record.relationship,
       concepts: record.concepts,
+      archetype: record.archetype,
       updatedAt: record.updatedAt
     })) ?? []
   }));
@@ -212,12 +236,18 @@ export async function registerMonitorRoutes(
   }
 
   app.post('/monitor/tts/enable', async () => {
-    setMonitorTtsEnabled(true, 1);
+    setMonitorTtsEnabled(true, MAX_MONITOR_TTS_GAIN);
     publishActivity({
       level: 'info',
       title: 'Monitor Luna voice enabled',
-      detail: 'Playback volume 100%'
+      detail: `OBS capture at max volume (${MAX_MONITOR_TTS_GAIN}×) — Fluffy lip sync only`
     });
-    return { ok: true, volume: 1, volumePercent: 100, textEnabled: true };
+    return {
+      ok: true,
+      volume: MAX_MONITOR_TTS_GAIN,
+      volumePercent: 100,
+      gain: MAX_MONITOR_TTS_GAIN,
+      textEnabled: true
+    };
   });
 }

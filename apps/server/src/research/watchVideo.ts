@@ -11,12 +11,12 @@ export interface WatchedVideoResult {
   ok: boolean;
   url: string;
   title: string;
-  channel?: string;
-  durationSeconds?: number | null;
+  channel?: string | undefined;
+  durationSeconds?: number | null | undefined;
   transcript: string;
-  visualDescription?: string;
+  visualDescription?: string | undefined;
   method: 'subtitles' | 'whisper' | 'description';
-  error?: string;
+  error?: string | undefined;
 }
 
 const VIDEO_HOST_RE = /(?:youtube\.com|youtu\.be|twitch\.tv|tiktok\.com|vimeo\.com)/i;

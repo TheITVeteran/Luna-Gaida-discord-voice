@@ -5,6 +5,9 @@ import type { PersonalityInstructionProvider } from '../personality/service.js';
 import { LunaDmStore } from '../memory/lunaDmStore.js';
 import type { UserVoiceMemoryStore } from '../memory/userVoiceMemory.js';
 import type { LunaLifeStore } from '../memory/lunaLifeStore.js';
+import type { LunaSelfConceptStore } from '../memory/lunaSelfConceptStore.js';
+import type { LunaGoalsStore } from '../memory/lunaGoalsStore.js';
+import type { LunaOpinionStore } from '../memory/lunaOpinionStore.js';
 import { OllamaTextClient } from '../providers/ollamaText.js';
 import { publishActivity } from '../monitor/activityFeed.js';
 import { logger } from '../logging/logger.js';
@@ -32,7 +35,10 @@ export class LunaDmInitiativeService {
     private readonly userVoiceMemory: UserVoiceMemoryStore,
     private readonly lunaLife: LunaLifeStore,
     private readonly getClient: () => Client | null,
-    private readonly getUsersInActiveVoice: () => Set<string>
+    private readonly getUsersInActiveVoice: () => Set<string>,
+    private readonly lunaSelfConcept?: LunaSelfConceptStore,
+    private readonly lunaGoals?: LunaGoalsStore,
+    private readonly lunaOpinions?: LunaOpinionStore
   ) {
     this.ollama = new OllamaTextClient(config);
     this.dmStore = new LunaDmStore(config.databasePath);
@@ -97,6 +103,27 @@ export class LunaDmInitiativeService {
           narrative: this.lunaLife.getNarrative(guildId)
         }))
         : [];
+      const selfConceptStore = this.lunaSelfConcept;
+      const goalsStore = this.lunaGoals;
+      const opinionsStore = this.lunaOpinions;
+      const selfConceptByGuild = this.config.LUNA_SELF_CONCEPT && selfConceptStore
+        ? guildIds.map((guildId) => ({
+          guildId,
+          narrative: selfConceptStore.getNarrative(guildId)
+        }))
+        : [];
+      const goalsByGuild = this.config.LUNA_GOALS && goalsStore
+        ? guildIds.map((guildId) => ({
+          guildId,
+          goals: goalsStore.getGoals(guildId)
+        }))
+        : [];
+      const opinionsByGuild = this.config.LUNA_OPINIONS && opinionsStore
+        ? guildIds.map((guildId) => ({
+          guildId,
+          opinions: opinionsStore.getOpinions(guildId)
+        }))
+        : [];
 
       const recentDmLines = this.dmStore.recent(8).map((entry) => {
         const name = entry.displayName ?? entry.userId;
@@ -107,6 +134,9 @@ export class LunaDmInitiativeService {
         personalityInstruction: this.personality.buildInstruction('discord', { nsfwAllowed: true }),
         candidates,
         lifeByGuild,
+        selfConceptByGuild,
+        goalsByGuild,
+        opinionsByGuild,
         recentDmLines
       });
 

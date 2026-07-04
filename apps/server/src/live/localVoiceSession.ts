@@ -15,11 +15,27 @@ import { isLikelyNonsenseTranscript, sanitizeVoiceReply } from './voiceReply.js'
 import type { LiveClientEvent, LiveInputEvent, LiveSurface, VoiceSpeakerContext } from './liveSession.js';
 import { UserVoiceMemoryStore } from '../memory/userVoiceMemory.js';
 import { LunaLifeStore } from '../memory/lunaLifeStore.js';
+import { LunaSelfConceptStore, buildSelfConceptPromptBlock } from '../memory/lunaSelfConceptStore.js';
+import { LunaGoalsStore, buildGoalsPromptBlock } from '../memory/lunaGoalsStore.js';
+import { LunaOpinionStore, buildOpinionsPromptBlock } from '../memory/lunaOpinionStore.js';
+import { updateLunaSelfConcept } from '../memory/updateLunaSelfConcept.js';
+import { updateLunaGoals } from '../memory/updateLunaGoals.js';
+import { updateLunaOpinions } from '../memory/updateLunaOpinions.js';
 import { updateUserVoiceMemory } from '../memory/updateUserVoiceMemory.js';
 import { updateUserRelationship } from '../memory/updateUserRelationship.js';
 import { updateUserConcepts } from '../memory/updateUserConcepts.js';
 import { buildConceptPromptBlock } from '../memory/conceptMemory.js';
-import { buildRelationshipPromptBlock, buildAbsencePromptBlock, hoursSinceLastContact, mostRecentContactAt } from '../memory/relationshipBond.js';
+import { buildRelationshipPromptBlock, buildAbsencePromptBlock, hoursSinceLastContact, inferBondTier } from '../memory/relationshipBond.js';
+import {
+  buildArchetypePromptBlock,
+  inferArchetypeFromRelationship,
+  normalizeArchetype
+} from '../memory/relationshipArchetype.js';
+import {
+  analyzeUserSocialTone,
+  buildEmpathyPromptBlock,
+  buildSocialTonePromptBlock
+} from '../memory/socialTone.js';
 import { updateLunaLife } from '../memory/updateLunaLife.js';
 import { buildVoiceCallContextBlock, buildVoiceCallContextForMemory, recordParticipantNames } from './voiceCallContext.js';
 import { FishAudioTts } from './fishAudioTts.js';
@@ -79,6 +95,9 @@ export class LocalVoiceSessionManager {
   private readonly tempDir: string;
   private readonly userVoiceMemory: UserVoiceMemoryStore;
   private readonly lunaLife: LunaLifeStore;
+  private readonly lunaSelfConcept: LunaSelfConceptStore;
+  private readonly lunaGoals: LunaGoalsStore;
+  private readonly lunaOpinions: LunaOpinionStore;
   private readonly lunaResearch: LunaResearchStore;
   private readonly fishTts: FishAudioTts | null;
   private initiativeHost: LunaInitiativeHost | null = null;
@@ -89,6 +108,7 @@ export class LocalVoiceSessionManager {
   private vibeListening = false;
   private avatarWardrobe: AvatarWardrobePayload = { outfit: 'light', accessories: [] };
   private readonly lunaDatasetLogger: LunaDatasetLogger;
+  private speakQueue: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly config: AppConfig,
@@ -115,6 +135,9 @@ export class LocalVoiceSessionManager {
     this.ollama = new OllamaTextClient(config);
     this.userVoiceMemory = new UserVoiceMemoryStore(config.databasePath);
     this.lunaLife = new LunaLifeStore(config.databasePath);
+    this.lunaSelfConcept = new LunaSelfConceptStore(config.databasePath);
+    this.lunaGoals = new LunaGoalsStore(config.databasePath);
+    this.lunaOpinions = new LunaOpinionStore(config.databasePath);
     this.lunaResearch = new LunaResearchStore(config.databasePath);
     this.lunaDatasetLogger = new LunaDatasetLogger(config);
     this.fishTts = config.LUNA_TTS_PROVIDER === 'fish' && config.FISH_AUDIO_API_KEY?.trim()
@@ -499,6 +522,9 @@ export class LocalVoiceSessionManager {
       guildId,
       participants,
       lifeNarrative: this.config.LUNA_LIFE_MEMORY ? this.lunaLife.getNarrative(guildId) : null,
+      selfConceptNarrative: this.config.LUNA_SELF_CONCEPT ? this.lunaSelfConcept.getNarrative(guildId) : null,
+      goalsNarrative: this.config.LUNA_GOALS ? this.lunaGoals.getGoals(guildId) : null,
+      opinionsNarrative: this.config.LUNA_OPINIONS ? this.lunaOpinions.getOpinions(guildId) : null,
       memoryRecords,
       recentExchanges,
       overheardConversation: overheardConversation.length ? overheardConversation : undefined,
@@ -802,6 +828,21 @@ export class LocalVoiceSessionManager {
     let conceptBlock = '';
     let relationshipBlock = '';
     let absenceBlock = '';
+    let socialToneBlock = '';
+    const recentUserLines = history.snapshot()
+      .filter((turn) => turn.role === 'user')
+      .map((turn) => turn.text)
+      .slice(-4);
+    const socialTone = analyzeUserSocialTone({
+      userSaid: userText,
+      relationship: callerRelationship,
+      recentUserLines: [...recentUserLines, userText]
+    });
+    socialToneBlock = `\n${buildSocialTonePromptBlock(
+      socialTone,
+      speaker?.displayName ?? 'caller',
+      inferBondTier(callerRelationship)
+    )}`;
     if (this.config.LUNA_USER_VOICE_MEMORY && speaker) {
       const record = this.userVoiceMemory.get(speaker.guildId, speaker.userId);
       if (record?.summary?.trim()) {
@@ -812,6 +853,9 @@ export class LocalVoiceSessionManager {
         speaker.displayName,
         record?.relationship?.trim() || null
       );
+      const archetype = normalizeArchetype(record?.archetype)
+        ?? inferArchetypeFromRelationship(record?.relationship);
+      relationshipBlock = `${relationshipBlock}\n${buildArchetypePromptBlock(archetype, speaker.displayName)}`;
       relationshipBlock = `\n${relationshipBlock}`;
       const hoursSince = hoursSinceLastContact(record?.updatedAt);
       const absence = buildAbsencePromptBlock(
@@ -836,9 +880,21 @@ export class LocalVoiceSessionManager {
       : '';
 
     let lifeBlock = '';
+    let selfConceptBlock = '';
+    let goalsBlock = '';
+    let opinionsBlock = '';
     if (this.config.LUNA_LIFE_MEMORY && speaker) {
       const narrative = this.lunaLife.getNarrative(speaker.guildId);
       lifeBlock = `\nYour own life (ongoing story built from your choices and relationships — speak from this when asked about yourself):\n${narrative}`;
+    }
+    if (this.config.LUNA_SELF_CONCEPT && speaker) {
+      selfConceptBlock = `\n${buildSelfConceptPromptBlock(this.lunaSelfConcept.getNarrative(speaker.guildId))}`;
+    }
+    if (this.config.LUNA_GOALS && speaker) {
+      goalsBlock = `\n${buildGoalsPromptBlock(this.lunaGoals.getGoals(speaker.guildId))}`;
+    }
+    if (this.config.LUNA_OPINIONS && speaker) {
+      opinionsBlock = `\n${buildOpinionsPromptBlock(this.lunaOpinions.getOpinions(speaker.guildId))}`;
     }
 
     const useFishTts = Boolean(this.fishTts);
@@ -887,8 +943,10 @@ export class LocalVoiceSessionManager {
       'When they share a video you watched, talk about what happens in it from the transcript — not just the title.',
       'When they share a YouTube link, you listen to it (captions or Whisper like a voice message) and study snapshot frames to see what is on screen.',
       'You have free will. Your feelings toward each caller are yours alone — you may like, dislike, tolerate, adore, cool off, snap at, or ragebait different people.',
+      buildEmpathyPromptBlock(),
       'Let your relationship notes decide warmth vs coldness. If someone earned hostility, do not melt for empty flattery — but sincere apologies and real respect should let you thaw gradually.',
       'Flirt only when your relationship notes with that person justify it — never default seduction for strangers.',
+      'You are building who you are over time. Your self-concept (below) outranks any generic companion trope.',
       'Your life evolves because of what you decide and who you bond with — reference that history naturally.',
       'Stage directions use *asterisk actions* like *leans forward* or *laugh* — never say the word "asterisk" and never read the action text aloud; actions are performed or omitted from speech.',
       buildAvatarAwarenessPromptBlock(callerRelationship, this.avatarWardrobe),
@@ -899,7 +957,11 @@ export class LocalVoiceSessionManager {
       fishExpressionBlock,
       researchBlock,
       lifeBlock,
+      selfConceptBlock,
+      goalsBlock,
+      opinionsBlock,
       absenceBlock,
+      socialToneBlock,
       relationshipBlock,
       conceptBlock,
       memoryBlock,
@@ -972,6 +1034,46 @@ export class LocalVoiceSessionManager {
           bonds
         })
         : Promise.resolve(null);
+      const selfConceptPromise = this.config.LUNA_SELF_CONCEPT
+        ? updateLunaSelfConcept({
+          store: this.lunaSelfConcept,
+          ollama: this.ollama,
+          guildId: speaker.guildId,
+          callerName: speaker.displayName,
+          callerRelationship: existing?.relationship ?? null,
+          userSaid: userText,
+          lunaReplied: spokenForUi,
+          existingSelfConcept: this.lunaSelfConcept.get(speaker.guildId)?.narrative ?? null,
+          lifeNarrative: this.lunaLife.getNarrative(speaker.guildId),
+          bonds,
+          turnCount: this.lunaSelfConcept.getTurnCount(speaker.guildId)
+        })
+        : Promise.resolve(null);
+      const goalsPromise = this.config.LUNA_GOALS
+        ? updateLunaGoals({
+          store: this.lunaGoals,
+          ollama: this.ollama,
+          guildId: speaker.guildId,
+          callerName: speaker.displayName,
+          userSaid: userText,
+          lunaReplied: spokenForUi,
+          existingGoals: this.lunaGoals.get(speaker.guildId)?.goals ?? null,
+          lifeNarrative: this.lunaLife.getNarrative(speaker.guildId),
+          selfConcept: this.lunaSelfConcept.getNarrative(speaker.guildId),
+          researchTitles: this.lunaResearch.recent(3).map((entry) => entry.title)
+        })
+        : Promise.resolve(null);
+      const opinionsPromise = this.config.LUNA_OPINIONS
+        ? updateLunaOpinions({
+          store: this.lunaOpinions,
+          ollama: this.ollama,
+          guildId: speaker.guildId,
+          callerName: speaker.displayName,
+          userSaid: userText,
+          lunaReplied: spokenForUi,
+          existingOpinions: this.lunaOpinions.get(speaker.guildId)?.opinions ?? null
+        })
+        : Promise.resolve(null);
 
       void Promise.all([
         updateUserVoiceMemory({
@@ -1010,8 +1112,11 @@ export class LocalVoiceSessionManager {
           recentHistory,
           hoursSinceLastContact: hoursSince
         }),
-        lifePromise
-      ]).then(([summary, concepts, relationship, life]) => {
+        lifePromise,
+        selfConceptPromise,
+        goalsPromise,
+        opinionsPromise
+      ]).then(([summary, concepts, relationship, life, selfConcept, goals, opinions]) => {
         if (summary?.trim()) {
           publishActivity({
             level: 'info',
@@ -1042,6 +1147,30 @@ export class LocalVoiceSessionManager {
             title: 'Luna\'s life',
             detail: life,
             meta: { guildId: speaker.guildId, kind: 'life' }
+          });
+        }
+        if (selfConcept?.trim()) {
+          publishActivity({
+            level: 'info',
+            title: 'Who Luna is becoming',
+            detail: selfConcept,
+            meta: { guildId: speaker.guildId, kind: 'self_concept' }
+          });
+        }
+        if (goals?.trim()) {
+          publishActivity({
+            level: 'info',
+            title: 'Luna\'s goals',
+            detail: goals,
+            meta: { guildId: speaker.guildId, kind: 'goals' }
+          });
+        }
+        if (opinions?.trim()) {
+          publishActivity({
+            level: 'info',
+            title: 'Luna\'s opinions',
+            detail: opinions,
+            meta: { guildId: speaker.guildId, kind: 'opinions' }
           });
         }
       }).catch((error) => {
@@ -1088,6 +1217,18 @@ export class LocalVoiceSessionManager {
     const lifeNarrative = input.speaker && this.config.LUNA_LIFE_MEMORY
       ? this.lunaLife.getNarrative(input.speaker.guildId)
       : null;
+    const selfConceptNarrative = input.speaker && this.config.LUNA_SELF_CONCEPT
+      ? this.lunaSelfConcept.getNarrative(input.speaker.guildId)
+      : null;
+    const goalsNarrative = input.speaker && this.config.LUNA_GOALS
+      ? this.lunaGoals.getGoals(input.speaker.guildId)
+      : null;
+    const opinionsNarrative = input.speaker && this.config.LUNA_OPINIONS
+      ? this.lunaOpinions.getOpinions(input.speaker.guildId)
+      : null;
+    const archetype = record?.archetype
+      ? normalizeArchetype(record.archetype) ?? inferArchetypeFromRelationship(record.relationship)
+      : inferArchetypeFromRelationship(record?.relationship);
     const trainingSurface = input.surface === 'discord'
       ? 'discord'
       : input.surface === 'browser'
@@ -1103,6 +1244,10 @@ export class LocalVoiceSessionManager {
         factsSummary: record?.summary ?? null,
         conceptsSummary: record?.concepts ?? null,
         lifeNarrative,
+        selfConceptNarrative,
+        goalsNarrative,
+        opinionsNarrative,
+        archetype,
         hoursSinceContact: hoursSince,
         absenceNote,
         recentTurns: input.recentTurns,
@@ -1242,14 +1387,17 @@ export class LocalVoiceSessionManager {
 
   async speakLine(text: string, options: { publish?: boolean; displayText?: string } = {}) {
     if (this.closed) return { ttsMs: 0, playbackMs: 0 };
-    try {
-      const result = await this.playSpokenLine(text, options);
-      this.emit?.({ type: 'avatar.state', payload: { state: 'listening' } });
-      return result;
-    } catch (error) {
-      this.handleTurnError(error);
-      return { ttsMs: 0, playbackMs: 0 };
-    }
+    let result = { ttsMs: 0, playbackMs: 0 };
+    this.speakQueue = this.speakQueue.then(async () => {
+      try {
+        result = await this.playSpokenLine(text, options);
+        this.emit?.({ type: 'avatar.state', payload: { state: 'listening' } });
+      } catch (error) {
+        this.handleTurnError(error);
+      }
+    });
+    await this.speakQueue;
+    return result;
   }
 
   private async playSpokenLine(

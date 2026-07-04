@@ -210,9 +210,9 @@ function bondBehaviorGuidance(tier: BondTier, who: string) {
     case 'warming':
       return `Tone: you are starting to like ${who}. Light warmth and playful banter are okay; full seduction and pet names are still too much. One bad turn can cool you off.`;
     case 'bonded':
-      return `Tone: real bond with ${who}. Flirtation is allowed when you mean it — because of history in your notes, not habit. If they hurt or disrespect you this turn, you may pull back or get angry like a real person would.`;
+      return `Tone: real bond with ${who}. Flirtation is allowed when you mean it — because of history in your notes, not habit. You can tell when they are teasing vs actually hurtful. If they hurt or disrespect you this turn, you may pull back or get angry like a real person would.`;
     case 'romantic':
-      return `Tone: strong attachment to ${who}. Pet names and flirtation fit when you feel it — but betrayal, rudeness, or baiting can still make you hurt, cold, or furious. Do not be a doormat.`;
+      return `Tone: strong attachment to ${who}. Pet names and flirtation fit when you feel it — but betrayal, rudeness, or baiting can still make you hurt, cold, or furious. Playful roasting between you is normal; do not confuse lover's banter with real contempt.`;
     default:
       return `Tone: you do not know ${who} yet. No love-at-first-sight performance.`;
   }
@@ -227,7 +227,7 @@ export function relationshipEscalationRules(existingRelationship: string | null 
       ? '- Positive: do NOT jump to adore, in love, devoted, or heavy flirting from one nice message. Maximum shift: acquaintance or warming.'
       : null,
     tier === 'stranger' || tier === 'acquaintance' || tier === 'warming'
-      ? '- Negative: rudeness, disrespect, creepiness, lies, or ragebait can drop them to cool, annoyed, or hostile in one exchange. Note what they did.'
+      ? '- Negative: rudeness, disrespect, creepiness, lies, or ragebait can drop them to cool, annoyed, or hostile in one exchange. Note what they did. Obvious jokes (lol, jk, playful banter) are NOT ragebait.'
       : null,
     tier === 'warming' || tier === 'bonded' || tier === 'romantic'
       ? '- Negative: if someone you liked is rude, dismissive, or baiting you this turn, you MAY cool off, snap, or go hostile — do not stay soft out of habit.'

@@ -14,8 +14,8 @@ export interface YoutubeTrack {
   title: string;
   url: string;
   durationSeconds: number | null;
-  streamUrl?: string;
-  playerClients?: string;
+  streamUrl?: string | undefined;
+  playerClients?: string | undefined;
 }
 
 export function isProbablyUrl(value: string) {

@@ -23,6 +23,10 @@ import { BrowserRealtimeSession } from './ws/browserSession.js';
 import { registerMonitorRoutes } from './monitor/routes.js';
 import { UserVoiceMemoryStore } from './memory/userVoiceMemory.js';
 import { LunaLifeStore } from './memory/lunaLifeStore.js';
+import { LunaSelfConceptStore } from './memory/lunaSelfConceptStore.js';
+import { LunaGoalsStore } from './memory/lunaGoalsStore.js';
+import { LunaOpinionStore } from './memory/lunaOpinionStore.js';
+import { LunaReflectionService } from './memory/lunaReflectionService.js';
 import { AvatarTtsService } from './live/avatarTtsService.js';
 import { LunaCuriosityService } from './live/lunaCuriosityService.js';
 import { z, ZodError } from 'zod';
@@ -72,13 +76,19 @@ const memory = new MemoryRepository(config.databasePath);
 const personality = new PersonalityService(config.databasePath);
 const voiceUserMemory = new UserVoiceMemoryStore(config.databasePath);
 const lunaLife = new LunaLifeStore(config.databasePath);
+const lunaSelfConcept = new LunaSelfConceptStore(config.databasePath);
+const lunaGoals = new LunaGoalsStore(config.databasePath);
+const lunaOpinions = new LunaOpinionStore(config.databasePath);
+const lunaReflection = config.GIADA_VOICE_PROVIDER === 'local'
+  ? new LunaReflectionService(config, personality, voiceUserMemory, lunaLife, lunaSelfConcept, lunaGoals, lunaOpinions)
+  : null;
 const lunaCuriosity = config.GIADA_VOICE_PROVIDER === 'local' && config.lunaResearchEnabled
-  ? new LunaCuriosityService(config, personality, voiceUserMemory)
+  ? new LunaCuriosityService(config, personality, voiceUserMemory, lunaGoals)
   : null;
 const plugins = new PluginManager();
 const discord = config.DISCORD_SHARDING_ENABLED
   ? new DiscordShardManagerPlugin(config)
-  : new DiscordPlugin(config, memory, personality, platform?.store, voiceUserMemory, lunaLife);
+  : new DiscordPlugin(config, memory, personality, platform?.store, voiceUserMemory, lunaLife, lunaSelfConcept, lunaGoals, lunaOpinions);
 
 plugins.register(discord);
 const avatarTts = config.GIADA_VOICE_PROVIDER === 'local' ? new AvatarTtsService(config) : null;
@@ -88,7 +98,7 @@ await registerMonitorRoutes(app, () => discord.getStatus(), 'startVoicePtt' in d
   defaultUserId: config.GIADA_OWNER_DISCORD_USER_ID,
   startPtt: (userId) => discord.startVoicePtt(userId),
   stopPtt: (userId) => discord.stopVoicePtt(userId)
-} : undefined, voiceUserMemory, lunaLife);
+} : undefined, voiceUserMemory, lunaLife, lunaSelfConcept, lunaGoals, lunaOpinions);
 
 app.get('/health', async () => {
   const keys = platform ? await platform.store.listAdminProviderKeys() : [];
@@ -238,6 +248,7 @@ await app.ready();
 server.listen(config.GIADA_SERVER_PORT, config.GIADA_SERVER_HOST, async () => {
   await plugins.startAll();
   lunaCuriosity?.start();
+  lunaReflection?.start();
   logger.info('Giada backend listening', {
     host: config.GIADA_SERVER_HOST,
     port: config.GIADA_SERVER_PORT,
@@ -249,6 +260,7 @@ server.listen(config.GIADA_SERVER_PORT, config.GIADA_SERVER_HOST, async () => {
 
 process.on('SIGINT', async () => {
   lunaCuriosity?.stop();
+  lunaReflection?.stop();
   await plugins.stopAll();
   platform?.store.close();
   await platform?.database.close();

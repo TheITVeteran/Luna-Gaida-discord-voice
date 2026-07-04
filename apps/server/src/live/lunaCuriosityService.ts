@@ -1,6 +1,7 @@
 import type { AppConfig } from '../config/env.js';
 import type { PersonalityInstructionProvider } from '../personality/service.js';
 import type { UserVoiceMemoryStore } from '../memory/userVoiceMemory.js';
+import type { LunaGoalsStore } from '../memory/lunaGoalsStore.js';
 import { LunaDmStore } from '../memory/lunaDmStore.js';
 import { LunaResearchStore } from '../memory/lunaResearchStore.js';
 import { OllamaTextClient } from '../providers/ollamaText.js';
@@ -31,7 +32,8 @@ export class LunaCuriosityService {
   constructor(
     private readonly config: AppConfig,
     private readonly personality: PersonalityInstructionProvider,
-    private readonly userVoiceMemory?: UserVoiceMemoryStore
+    private readonly userVoiceMemory?: UserVoiceMemoryStore,
+    private readonly lunaGoals?: LunaGoalsStore
   ) {
     this.ollama = new OllamaTextClient(config);
     this.researchStore = new LunaResearchStore(config.databasePath);
@@ -95,11 +97,16 @@ export class LunaCuriosityService {
       const browsePlan = planInterestBrowse(dmLines, voiceSnippets, this.researchStore);
       const plannedBrowse = formatInterestBrowseHint(browsePlan);
 
+      const activeGoals = this.config.LUNA_GOALS && this.lunaGoals
+        ? this.lunaGoals.listGuildIds(3).map((guildId) => this.lunaGoals!.getGoals(guildId)).join('\n')
+        : null;
+
       const { system, userPrompt } = buildLunaCuriosityPrompt({
         personalityInstruction: this.personality.buildInstruction('discord', { nsfwAllowed: true }),
         recentResearchLines,
         recentConversationLines,
         plannedBrowse,
+        activeGoals,
         rssFeedCount: this.config.lunaRssFeeds.length
       });
 

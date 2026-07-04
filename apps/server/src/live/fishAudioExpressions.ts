@@ -47,8 +47,8 @@ export const FISH_AUDIO_EXPRESSION_PROMPT = [
 
 export interface FishTtsEnrichContext {
   relationship?: string | null | undefined;
-  actions?: string[];
-  defaultMood?: string;
+  actions?: string[] | undefined;
+  defaultMood?: string | undefined;
 }
 
 const SENTENCE_END = /(?<=[.!?…])\s+/;

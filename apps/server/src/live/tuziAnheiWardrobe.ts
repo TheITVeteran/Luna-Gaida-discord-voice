@@ -17,10 +17,10 @@ export interface AvatarWardrobePayload {
 }
 
 export interface WardrobeResolveInput {
-  relationship?: string | null;
-  actions?: string[];
-  replyText?: string;
-  previous?: AvatarWardrobePayload | null;
+  relationship?: string | null | undefined;
+  actions?: string[] | undefined;
+  replyText?: string | undefined;
+  previous?: AvatarWardrobePayload | null | undefined;
 }
 
 const ALL_ACCESSORIES: TuziAnheiAccessory[] = [

@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="dark" />
   <meta name="theme-color" content="#020810" />
   <title>Luna Live Monitor</title>
-  <link rel="stylesheet" href="/monitor/style.css?v=9" />
+  <link rel="stylesheet" href="/monitor/style.css?v=11" />
 </head>
 <body>
   <header>
@@ -14,36 +14,50 @@
     <span id="connection" class="status-pill offline">Connecting…</span>
   </header>
   <main>
-    <section class="card">
-      <h2>Status</h2>
-      <div id="bot-name" class="stat"><strong>Bot:</strong> —</div>
-      <div id="voice-state" class="stat"><strong>Voice:</strong> not in channel</div>
-      <div id="voice-mode" class="stat"><strong>Mode:</strong> —</div>
-      <div id="voice-diag" class="stat"><strong>Last heard:</strong> —</div>
-      <div id="voice-out" class="stat"><strong>Last spoke:</strong> —</div>
-      <div id="last-error" class="stat"><strong>Last error:</strong> none</div>
-      <button id="tts-btn" type="button" class="tts-btn">Enable Luna voice + text</button>
-      <div id="tts-hint">Click once so this page can play TTS and show Luna's replies as text (for OBS browser capture). Lip sync stays on the Fluffy window.</div>
-      <div id="luna-conversation" class="luna-conversation hidden" aria-live="polite">
-        <div class="luna-conversation-empty">Luna's replies will appear here…</div>
-      </div>
-      <button id="ptt-btn" type="button" disabled>Hold to Talk</button>
-      <div id="ptt-hint">Join voice with Luna first. Hold this button while speaking, then release to send.</div>
-    </section>
-    <section class="card">
-      <h2>Luna's life</h2>
-      <div id="life-panel" class="life-panel"><div class="empty">Her story is just beginning…</div></div>
-    </section>
-    <section class="card">
-      <h2>Caller memory & feelings</h2>
-      <p class="section-hint">Reset feelings = overnight cool-off (facts kept). Wipe memory = forget everything about that person and start fresh.</p>
-      <div id="memory-panel" class="memory-panel"><div class="empty">No saved caller notes yet.</div></div>
-    </section>
-    <section class="card">
+    <div class="monitor-sidebar">
+      <section class="card">
+        <h2>Status</h2>
+        <div id="bot-name" class="stat"><strong>Bot:</strong> —</div>
+        <div id="voice-state" class="stat"><strong>Voice:</strong> not in channel</div>
+        <div id="voice-mode" class="stat"><strong>Mode:</strong> —</div>
+        <div id="voice-diag" class="stat"><strong>Last heard:</strong> —</div>
+        <div id="voice-out" class="stat"><strong>Last spoke:</strong> —</div>
+        <div id="last-error" class="stat"><strong>Last error:</strong> none</div>
+        <button id="tts-btn" type="button" class="tts-btn">Enable Luna voice + text</button>
+        <div id="tts-hint">Click once so this page plays Luna's voice and shows reply text for OBS. Fluffy keeps lip sync only — her Electron window will not double-play audio.</div>
+        <div id="luna-conversation" class="luna-conversation hidden" aria-live="polite">
+          <div class="luna-conversation-empty">Luna's replies will appear here…</div>
+        </div>
+        <button id="ptt-btn" type="button" disabled>Hold to Talk</button>
+        <div id="ptt-hint">Join voice with Luna first. Hold this button while speaking, then release to send.</div>
+      </section>
+      <section class="card">
+        <h2>Who Luna is becoming</h2>
+        <div id="self-concept-panel" class="life-panel"><div class="empty">Her sense of self is still forming…</div></div>
+      </section>
+      <section class="card">
+        <h2>Luna's goals</h2>
+        <div id="goals-panel" class="life-panel"><div class="empty">No goals yet — she'll pick her own…</div></div>
+      </section>
+      <section class="card">
+        <h2>Luna's opinions</h2>
+        <div id="opinions-panel" class="life-panel"><div class="empty">She hasn't taken many stances yet…</div></div>
+      </section>
+      <section class="card">
+        <h2>Luna's life</h2>
+        <div id="life-panel" class="life-panel"><div class="empty">Her story is just beginning…</div></div>
+      </section>
+      <section class="card">
+        <h2>Caller memory & feelings</h2>
+        <p class="section-hint">Reset feelings = overnight cool-off (facts kept). Wipe memory = forget everything about that person and start fresh.</p>
+        <div id="memory-panel" class="memory-panel"><div class="empty">No saved caller notes yet.</div></div>
+      </section>
+    </div>
+    <section class="card monitor-activity">
       <h2>Live activity</h2>
       <div id="feed"><div class="empty">Waiting for events…</div></div>
     </section>
   </main>
-  <script src="/monitor/app.js?v=9"></script>
+  <script src="/monitor/app.js?v=11"></script>
 </body>
 </html>

@@ -11,6 +11,7 @@ export interface VoiceUserMemory {
   summary: string;
   relationship: string;
   concepts: string;
+  archetype: string;
   updatedAt: string;
 }
 
@@ -21,6 +22,7 @@ interface VoiceUserMemoryRow {
   summary: string;
   relationship: string;
   concepts: string;
+  archetype: string;
   updated_at: string;
 }
 
@@ -50,7 +52,15 @@ export class UserVoiceMemoryStore {
     `);
     this.ensureRelationshipColumn();
     this.ensureConceptsColumn();
+    this.ensureArchetypeColumn();
     this.importLegacyRowsIfEmpty();
+  }
+
+  private ensureArchetypeColumn() {
+    const columns = this.db.prepare('PRAGMA table_info(luna_voice_user_memory)').all() as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === 'archetype')) {
+      this.db.exec(`ALTER TABLE luna_voice_user_memory ADD COLUMN archetype TEXT NOT NULL DEFAULT ''`);
+    }
   }
 
   private ensureConceptsColumn() {
@@ -107,7 +117,7 @@ export class UserVoiceMemoryStore {
 
   get(guildId: string, userId: string): VoiceUserMemory | null {
     const row = this.db.prepare(`
-      SELECT guild_id, user_id, display_name, summary, relationship, concepts, updated_at
+      SELECT guild_id, user_id, display_name, summary, relationship, concepts, archetype, updated_at
       FROM luna_voice_user_memory
       WHERE guild_id = ? AND user_id = ?
     `).get(guildId, userId) as VoiceUserMemoryRow | undefined;
@@ -154,6 +164,20 @@ export class UserVoiceMemoryStore {
     return normalized;
   }
 
+  saveArchetype(guildId: string, userId: string, displayName: string | null, archetype: string) {
+    const normalized = archetype.trim().toLowerCase();
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO luna_voice_user_memory (guild_id, user_id, display_name, summary, relationship, concepts, archetype, updated_at)
+      VALUES (@guildId, @userId, @displayName, '', '', '', @archetype, @updatedAt)
+      ON CONFLICT(guild_id, user_id) DO UPDATE SET
+        display_name = excluded.display_name,
+        archetype = excluded.archetype,
+        updated_at = excluded.updated_at
+    `).run({ guildId, userId, displayName, archetype: normalized, updatedAt: now });
+    return normalized;
+  }
+
   saveConcepts(guildId: string, userId: string, displayName: string | null, concepts: string) {
     const normalized = normalizeBulletSummary(concepts, 6, 12);
     const now = new Date().toISOString();
@@ -176,7 +200,7 @@ export class UserVoiceMemoryStore {
 
   listForGuild(guildId: string, limit = 50): VoiceUserMemory[] {
     const rows = this.db.prepare(`
-      SELECT guild_id, user_id, display_name, summary, relationship, concepts, updated_at
+      SELECT guild_id, user_id, display_name, summary, relationship, concepts, archetype, updated_at
       FROM luna_voice_user_memory
       WHERE guild_id = ?
       ORDER BY updated_at DESC
@@ -187,7 +211,7 @@ export class UserVoiceMemoryStore {
 
   listAll(limit = 100): VoiceUserMemory[] {
     const rows = this.db.prepare(`
-      SELECT guild_id, user_id, display_name, summary, relationship, concepts, updated_at
+      SELECT guild_id, user_id, display_name, summary, relationship, concepts, archetype, updated_at
       FROM luna_voice_user_memory
       ORDER BY updated_at DESC
       LIMIT ?
@@ -248,6 +272,7 @@ function mapRow(row: VoiceUserMemoryRow): VoiceUserMemory {
     summary: row.summary,
     relationship: row.relationship ?? '',
     concepts: row.concepts ?? '',
+    archetype: row.archetype ?? '',
     updatedAt: row.updated_at
   };
 }

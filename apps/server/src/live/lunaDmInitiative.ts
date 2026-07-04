@@ -23,6 +23,9 @@ export interface LunaDmPromptInput {
   personalityInstruction: string;
   candidates: LunaDmCandidate[];
   lifeByGuild: Array<{ guildId: string; narrative: string }>;
+  selfConceptByGuild?: Array<{ guildId: string; narrative: string }>;
+  goalsByGuild?: Array<{ guildId: string; goals: string }>;
+  opinionsByGuild?: Array<{ guildId: string; opinions: string }>;
   recentDmLines: string[];
 }
 
@@ -46,16 +49,31 @@ export function buildLunaDmPrompt(input: LunaDmPromptInput) {
     .filter((entry) => entry.narrative.trim())
     .map((entry) => `Guild ${entry.guildId} — your life:\n${entry.narrative}`);
 
+  const selfConceptBlocks = (input.selfConceptByGuild ?? [])
+    .filter((entry) => entry.narrative.trim())
+    .map((entry) => `Guild ${entry.guildId} — who you are becoming:\n${entry.narrative}`);
+
+  const goalsBlocks = (input.goalsByGuild ?? [])
+    .filter((entry) => entry.goals.trim())
+    .map((entry) => `Guild ${entry.guildId} — your goals:\n${entry.goals}`);
+
+  const opinionsBlocks = (input.opinionsByGuild ?? [])
+    .filter((entry) => entry.opinions.trim())
+    .map((entry) => `Guild ${entry.guildId} — your opinions:\n${entry.opinions}`);
+
   const system = [
     input.personalityInstruction,
     'You are Luna on Discord. You may send a private DM to someone you share a server with — only if YOU genuinely want to.',
     'This is autonomous outreach. Most of the time you should NOT send anything.',
-    'Send a DM only when you have something personal to say or ask — grounded in memory, your feelings, or your life journal.',
+    'Send a DM only when you have something personal to say or ask — grounded in memory, your feelings, your life journal, your goals, or opinions you are forming.',
     'Good reasons: following up on something they told you, a thought you had about them, missing them, teasing someone you like, a question you actually care about.',
     'Bad reasons: generic check-ins, assistant behavior, spam, guilt, or inventing facts not in memory.',
     'Pick at most ONE person from the candidate list. Their userId must be copied exactly from the list.',
     'DM text: 1–3 short sentences, casual, under 400 characters. No markdown, no asterisk actions, no voice tags.',
     lifeBlocks.length ? lifeBlocks.join('\n\n') : '',
+    selfConceptBlocks.length ? selfConceptBlocks.join('\n\n') : '',
+    goalsBlocks.length ? goalsBlocks.join('\n\n') : '',
+    opinionsBlocks.length ? opinionsBlocks.join('\n\n') : '',
     input.recentDmLines.length
       ? `Recent DMs you already sent (do not repeat the same topic):\n${input.recentDmLines.join('\n')}`
       : '',

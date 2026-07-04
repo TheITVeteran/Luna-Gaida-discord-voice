@@ -36,9 +36,9 @@ export interface VoiceController {
 }
 
 export interface ToolRegistryOptions {
-  searxngUrl?: string;
-  searchProvider?: SearchProvider;
-  memoryToolsEnabled?: boolean;
+  searxngUrl?: string | undefined;
+  searchProvider?: SearchProvider | undefined;
+  memoryToolsEnabled?: boolean | undefined;
 }
 
 const memoryToolNames = new Set(['writeMemory', 'retrieveMemory']);

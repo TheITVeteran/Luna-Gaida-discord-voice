@@ -16,8 +16,8 @@ export interface WebSearchResponse {
 export type SearchProvider = 'duckduckgo' | 'searxng';
 
 export interface SearchWebOptions {
-  searxngUrl?: string;
-  provider?: SearchProvider;
+  searxngUrl?: string | undefined;
+  provider?: SearchProvider | undefined;
 }
 
 const USER_AGENT = 'giada-assistant/0.1 (Luna research)';

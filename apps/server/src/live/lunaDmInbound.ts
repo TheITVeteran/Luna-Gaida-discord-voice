@@ -2,12 +2,24 @@ import type { AppConfig } from '../config/env.js';
 import type { PersonalityInstructionProvider } from '../personality/service.js';
 import type { UserVoiceMemoryStore } from '../memory/userVoiceMemory.js';
 import type { LunaLifeStore } from '../memory/lunaLifeStore.js';
+import type { LunaSelfConceptStore } from '../memory/lunaSelfConceptStore.js';
+import { buildSelfConceptPromptBlock } from '../memory/lunaSelfConceptStore.js';
+import type { LunaGoalsStore } from '../memory/lunaGoalsStore.js';
+import { buildGoalsPromptBlock } from '../memory/lunaGoalsStore.js';
+import type { LunaOpinionStore } from '../memory/lunaOpinionStore.js';
+import { buildOpinionsPromptBlock } from '../memory/lunaOpinionStore.js';
+import {
+  buildArchetypePromptBlock,
+  inferArchetypeFromRelationship,
+  normalizeArchetype
+} from '../memory/relationshipArchetype.js';
 import type { LunaDmStore } from '../memory/lunaDmStore.js';
 import { OllamaTextClient } from '../providers/ollamaText.js';
 import { assertDiscordSafe, sanitizeForDiscord } from '../policy/privacy.js';
 import { buildResearchContextBlock, buildMessageResearchBlock, buildResearchCapabilityBlock } from './researchForMessage.js';
 import { LunaResearchStore } from '../memory/lunaResearchStore.js';
-import { buildRelationshipPromptBlock, buildAbsencePromptBlock, hoursSinceLastContact, mostRecentContactAt } from '../memory/relationshipBond.js';
+import { buildRelationshipPromptBlock, buildAbsencePromptBlock, hoursSinceLastContact, inferBondTier, mostRecentContactAt } from '../memory/relationshipBond.js';
+import { analyzeUserSocialTone, buildEmpathyPromptBlock, buildSocialTonePromptBlock } from '../memory/socialTone.js';
 import { buildAvatarAwarenessPromptBlock, resolveAvatarWardrobe } from './tuziAnheiWardrobe.js';
 import type { ConversationResearchContext } from '../research/conversationResearch.js';
 
@@ -25,6 +37,9 @@ export async function generateLunaInboundDmReply(
   personality: PersonalityInstructionProvider,
   userVoiceMemory: UserVoiceMemoryStore | undefined,
   lunaLife: LunaLifeStore | undefined,
+  lunaSelfConcept: LunaSelfConceptStore | undefined,
+  lunaGoals: LunaGoalsStore | undefined,
+  lunaOpinions: LunaOpinionStore | undefined,
   lunaDmStore: LunaDmStore | undefined,
   input: LunaInboundDmInput
 ): Promise<string | null> {
@@ -45,6 +60,9 @@ export async function generateLunaInboundDmReply(
     }
     if (record?.relationship?.trim()) {
       relationshipBlock = buildRelationshipPromptBlock(input.displayName, record.relationship);
+      const archetype = normalizeArchetype(record.archetype)
+        ?? inferArchetypeFromRelationship(record.relationship);
+      relationshipBlock = `${relationshipBlock}\n${buildArchetypePromptBlock(archetype, input.displayName)}`;
     } else {
       relationshipBlock = buildRelationshipPromptBlock(input.displayName, null);
     }
@@ -69,9 +87,37 @@ export async function generateLunaInboundDmReply(
     }
   }
 
+  let selfConceptBlock = '';
+  if (lunaSelfConcept && input.guildId) {
+    selfConceptBlock = buildSelfConceptPromptBlock(lunaSelfConcept.getNarrative(input.guildId));
+  }
+
+  let goalsBlock = '';
+  if (lunaGoals && input.guildId && config.LUNA_GOALS) {
+    goalsBlock = buildGoalsPromptBlock(lunaGoals.getGoals(input.guildId));
+  }
+
+  let opinionsBlock = '';
+  if (lunaOpinions && input.guildId && config.LUNA_OPINIONS) {
+    opinionsBlock = buildOpinionsPromptBlock(lunaOpinions.getOpinions(input.guildId));
+  }
+
   const relationshipNotes = userVoiceMemory && input.guildId
     ? userVoiceMemory.get(input.guildId, input.authorId)?.relationship ?? null
     : null;
+  const socialTone = analyzeUserSocialTone({
+    userSaid: input.text,
+    relationship: relationshipNotes,
+    recentUserLines: input.recentDmLines
+      .filter((line) => line.toLowerCase().startsWith(`${input.displayName.toLowerCase()}:`))
+      .map((line) => line.split(':').slice(1).join(':').trim())
+      .slice(-4)
+  });
+  const socialToneBlock = buildSocialTonePromptBlock(
+    socialTone,
+    input.displayName,
+    inferBondTier(relationshipNotes)
+  );
   const avatarBlock = buildAvatarAwarenessPromptBlock(
     relationshipNotes,
     resolveAvatarWardrobe({ relationship: relationshipNotes })
@@ -112,7 +158,9 @@ export async function generateLunaInboundDmReply(
     'When they ask about news, headlines, or current events, discuss those topics directly using your research notes — share specifics and your take; do not invent facts beyond research.',
     'You have live DuckDuckGo search in this session. Never deny web access or cite a training-data cutoff — that is wrong for you.',
     'You search the live web via DuckDuckGo for current facts when needed — research notes below are from that search; do not invent beyond them.',
+    buildEmpathyPromptBlock(),
     'Relationship notes only shape warmth and tone; they never excuse dodging the question they asked.',
+    socialToneBlock,
     'If relationship notes are annoyed or hostile, you may be cold, sarcastic, angry, or provocative — bonds cool down too.',
     avatarBlock,
     'Keep it concise: usually 1–4 sentences unless they asked for detail.',
@@ -123,6 +171,9 @@ export async function generateLunaInboundDmReply(
       : '',
     memoryBlock,
     relationshipBlock,
+    selfConceptBlock,
+    goalsBlock,
+    opinionsBlock,
     absenceBlock,
     lifeBlock,
     researchBlock
@@ -165,6 +216,7 @@ export function buildLunaDmConversationRules(recentDmLines: string[] = []) {
     'If they ask a follow-up on the same topic, go deeper or add a new angle — do not repeat your previous reply with small edits.',
     'Match intimacy to your relationship notes. Do not default to pet names or heavy romance unless that bond is clearly established there.',
     'If your relationship notes say annoyed, cold, or hostile, you may be sarcastic, blunt, angry, or deliberately provocative — like a real person, not a polite bot.',
+    'Still read whether they are joking or venting before you punish them — banter and stress are not the same as cruelty.',
     'Bonds cool down too: disrespect, baiting, or boredom can make you pull back or snap even with someone you used to like.',
     'Be intuitive — notice what they care about from recent chat and memory; connect your answer to those interests when it fits naturally.',
     'Vary your phrasing. Avoid predictable romantic openers and the same closing line every time.'
