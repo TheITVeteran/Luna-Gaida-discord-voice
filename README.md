@@ -95,7 +95,10 @@ start-luna.bat
 | `TWITCH_OAUTH_TOKEN` / `twitch_channel` | Twitch chat read (TTS replies in Electron by default) |
 | `LUNA_TWITCH_LIVE_CHAT_REPLY=1` | Also type Twitch replies in chat (off by default) |
 | `LUNA_YOUTUBE_LIVE_CHAT=1` | Optional YouTube live chat (read → TTS) |
-| `LUNA_YOUTUBE_LIVE_CHECK_URL` | Your `@channel/live` URL |
+| `LUNA_DISCORD_TTS_TEXT_CHANNELS` | Discord channel IDs — user text is answered via TTS while Luna is in voice (includes that channel's own chat if it's a voice channel) |
+| `LUNA_YOUTUBE_LIVE_INTRO=1` | Luna speaks an on-stream intro when YouTube goes live |
+| `LUNA_YOUTUBE_LIVE_OUTRO=1` | Timed outro with viewer thanks + call to action |
+| `LUNA_YOUTUBE_LIVE_OUTRO_AFTER_MIN=120` | Minutes after go-live before the outro (default 2h) |
 
 **Never commit `.env`** — it's gitignored. See `.env.example` for more options.
 

@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { listActivity, subscribeActivity, publishActivity } from './activityFeed.js';
-import { MAX_MONITOR_TTS_GAIN, setMonitorTtsEnabled } from '../live/lunaTtsOutput.js';
+import { setLiveChatTextRepliesEnabled } from '../live/lunaTtsOutput.js';
 import type { UserVoiceMemoryStore } from '../memory/userVoiceMemory.js';
 import type { LunaLifeStore } from '../memory/lunaLifeStore.js';
 import type { LunaSelfConceptStore } from '../memory/lunaSelfConceptStore.js';
@@ -236,18 +236,12 @@ export async function registerMonitorRoutes(
   }
 
   app.post('/monitor/tts/enable', async () => {
-    setMonitorTtsEnabled(true, MAX_MONITOR_TTS_GAIN);
+    setLiveChatTextRepliesEnabled(true);
     publishActivity({
       level: 'info',
-      title: 'Monitor Luna voice enabled',
-      detail: `OBS capture at max volume (${MAX_MONITOR_TTS_GAIN}×) — Fluffy lip sync only`
+      title: 'Luna chat text replies enabled',
+      detail: 'Typed replies go to Discord + Twitch. Voice plays from Fluffy Electron. YouTube is voice-only (read-only chat API).'
     });
-    return {
-      ok: true,
-      volume: MAX_MONITOR_TTS_GAIN,
-      volumePercent: 100,
-      gain: MAX_MONITOR_TTS_GAIN,
-      textEnabled: true
-    };
+    return { ok: true, textEnabled: true };
   });
 }

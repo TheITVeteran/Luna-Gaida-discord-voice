@@ -92,7 +92,13 @@ const discord = config.DISCORD_SHARDING_ENABLED
 
 plugins.register(discord);
 const avatarTts = config.GIADA_VOICE_PROVIDER === 'local' ? new AvatarTtsService(config) : null;
-plugins.register(new LiveChatPlugin(config, personality, discord instanceof DiscordPlugin ? discord : undefined, avatarTts));
+plugins.register(new LiveChatPlugin(config, personality, {
+  userVoiceMemory: voiceUserMemory,
+  lunaLife,
+  lunaSelfConcept,
+  lunaGoals,
+  lunaOpinions
+}, discord instanceof DiscordPlugin ? discord : undefined, avatarTts));
 
 await registerMonitorRoutes(app, () => discord.getStatus(), 'startVoicePtt' in discord ? {
   defaultUserId: config.GIADA_OWNER_DISCORD_USER_ID,

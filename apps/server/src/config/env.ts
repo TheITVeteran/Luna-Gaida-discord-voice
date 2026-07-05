@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { parseWakePhrases } from '../live/wakePhrase.js';
+import { parseDiscordChannelIdList } from '../plugins/discord/discordTtsTextChannels.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const envCandidates = [
@@ -89,6 +90,7 @@ const envSchema = z.object({
   LUNA_WAKE_PHRASES: z.string().default('hey luna,hello luna'),
   LUNA_WAKE_REQUIRED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
   LUNA_VOICE_INPUT_MODE: z.enum(['auto', 'ptt']).default('ptt'),
+  LUNA_DISCORD_TTS_TEXT_CHANNELS: z.string().optional(),
   LUNA_SPEECH_END_SILENCE_MS: z.coerce.number().int().positive().default(5000),
   LUNA_DEBUG_AUDIO: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
   LUNA_USER_VOICE_MEMORY: z.enum(['true', 'false']).default('true').transform((value) => value === 'true'),
@@ -171,9 +173,13 @@ const envSchema = z.object({
   LUNA_YOUTUBE_LIVE_AUTO_TRIGGER: z.string().optional(),
   LUNA_YOUTUBE_LIVE_TTS: z.enum(['true', 'false', '1', '0']).optional(),
   LUNA_YOUTUBE_LIVE_POLL_SEC: z.coerce.number().positive().optional(),
+  LUNA_YOUTUBE_LIVE_INTRO: z.enum(['true', 'false', '1', '0']).optional(),
+  LUNA_YOUTUBE_LIVE_OUTRO: z.enum(['true', 'false', '1', '0']).optional(),
+  LUNA_YOUTUBE_LIVE_OUTRO_AFTER_MIN: z.coerce.number().int().min(5).max(480).default(120),
   LUNA_LIVE_CHAT_MAX_QUEUE: z.coerce.number().int().min(1).max(32).default(8),
   LUNA_LIVE_CHAT_BATCH_MS: z.coerce.number().int().min(100).max(5000).default(700),
   LUNA_LIVE_CHAT_MIN_GAP_MS: z.coerce.number().int().min(0).max(10_000).default(400),
+  LUNA_LIVE_CHAT_GUILD_ID: z.string().optional(),
   YOUTUBE_CLIENT_ID: z.string().optional(),
   YOUTUBE_CLIENT_SECRET: z.string().optional(),
   YOUTUBE_REFRESH_TOKEN: z.string().optional()
@@ -222,6 +228,9 @@ export function loadConfig() {
   const ollamaReasoningEffort = parsed.OLLAMA_REASONING_EFFORT
     ?? parsed.GROQ_REASONING_EFFORT
     ?? 'none';
+  const lunaDiscordTtsTextChannelIds = parseDiscordChannelIdList(
+    parsed.LUNA_DISCORD_TTS_TEXT_CHANNELS ?? envString('LUNA_DISCORD_TTS_TEXT_CHANNELS')
+  );
 
   return {
     ...parsed,
@@ -229,6 +238,7 @@ export function loadConfig() {
     ollamaModel,
     ollamaTimeoutMs,
     ollamaReasoningEffort,
+    lunaDiscordTtsTextChannelIds,
     twitchUsername,
     twitchChannel,
     twitchClientId,
@@ -242,12 +252,16 @@ export function loadConfig() {
     lunaLiveChatMaxBatch: parsed.LUNA_LIVE_CHAT_MAX_QUEUE,
     lunaLiveChatBatchMs: parsed.LUNA_LIVE_CHAT_BATCH_MS,
     lunaLiveChatMinGapMs: parsed.LUNA_LIVE_CHAT_MIN_GAP_MS,
+    lunaLiveChatGuildId: parsed.LUNA_LIVE_CHAT_GUILD_ID ?? envString('LUNA_LIVE_CHAT_GUILD_ID'),
     youtubeLiveChat,
     youtubeCheckUrl: parsed.LUNA_YOUTUBE_LIVE_CHECK_URL ?? envString('LUNA_YOUTUBE_LIVE_CHECK_URL'),
     youtubeAutoReply: envFlag('LUNA_YOUTUBE_LIVE_AUTO_REPLY') ?? true,
     youtubeTts: envFlag('LUNA_YOUTUBE_LIVE_TTS') ?? true,
     youtubeAutoTrigger: parsed.LUNA_YOUTUBE_LIVE_AUTO_TRIGGER ?? envString('LUNA_YOUTUBE_LIVE_AUTO_TRIGGER') ?? 'all',
     youtubePollSec: parsed.LUNA_YOUTUBE_LIVE_POLL_SEC ?? 0.5,
+    youtubeLiveIntro: envFlag('LUNA_YOUTUBE_LIVE_INTRO') ?? true,
+    youtubeLiveOutro: envFlag('LUNA_YOUTUBE_LIVE_OUTRO') ?? true,
+    youtubeLiveOutroAfterMin: parsed.LUNA_YOUTUBE_LIVE_OUTRO_AFTER_MIN ?? 120,
     lunaCreatorName: parsed.LUNA_CREATOR_NAME ?? envString('LUNA_CREATOR_NAME'),
     lunaOwnerTwitchLogin: parsed.LUNA_OWNER_TWITCH_LOGIN ?? envString('LUNA_OWNER_TWITCH_LOGIN'),
     lunaAutonomousReachOut: envFlag('LUNA_AUTONOMOUS_REACH_OUT') ?? parsed.GIADA_VOICE_PROVIDER === 'local',

@@ -24,6 +24,7 @@ import { updateLunaOpinions } from '../memory/updateLunaOpinions.js';
 import { updateUserVoiceMemory } from '../memory/updateUserVoiceMemory.js';
 import { updateUserRelationship } from '../memory/updateUserRelationship.js';
 import { updateUserConcepts } from '../memory/updateUserConcepts.js';
+import { buildCallerFirstRule } from '../memory/callerContext.js';
 import { buildConceptPromptBlock } from '../memory/conceptMemory.js';
 import { buildRelationshipPromptBlock, buildAbsencePromptBlock, hoursSinceLastContact, inferBondTier } from '../memory/relationshipBond.js';
 import {
@@ -934,6 +935,7 @@ export class LocalVoiceSessionManager {
 
     const system = [
       this.personality.buildInstruction(surface, { nsfwAllowed: true }),
+      buildCallerFirstRule(),
       'You are speaking aloud in a Discord voice channel as Luna only. Your name is Luna — never Giada, never a generic assistant.',
       'Answer the actual question first. When asked about your day, hobbies, or plans, draw from your life journal below.',
       'When someone asks about news, current events, or factual topics you looked up, use your web research notes below — do not invent headlines or facts.',

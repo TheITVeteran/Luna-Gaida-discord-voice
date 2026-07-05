@@ -602,9 +602,6 @@ export class DiscordVoiceBridge implements MusicController, VoiceController {
   }
 
   speakTextChatMessage(authorName: string, text: string) {
-    if (this.isPttSession()) {
-      return;
-    }
     const normalized = text.replace(/\s+/g, ' ').trim();
     if (!normalized || this.destroyed) {
       return;
@@ -644,7 +641,7 @@ export class DiscordVoiceBridge implements MusicController, VoiceController {
     this.inputQueue = this.inputQueue
       .then(() => this.live.handleInput({
         type: 'text',
-        text: `Discord voice channel text chat messages sent while you were connected to voice:\n${text}`
+        text: `Discord text chat messages from users in voice or linked text channels:\n${text}`
       }, 'discord'))
       .then(() => {
         if (this.pendingVoiceTextMessages.length) {

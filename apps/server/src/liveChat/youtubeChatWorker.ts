@@ -14,16 +14,28 @@ export interface LiveChatMessage {
 
 type MessageListener = (message: LiveChatMessage) => void;
 
+export type YoutubeLifecycleEvent =
+  | { type: 'live_ready'; videoId: string }
+  | { type: 'offline'; videoId: string | null };
+
+type LifecycleListener = (event: YoutubeLifecycleEvent) => void;
+
 export class YoutubeChatWorker {
   private process: ChildProcessWithoutNullStreams | null = null;
   private ready: Promise<void> | null = null;
   private closed = false;
   private listener: MessageListener | null = null;
+  private lifecycleListener: LifecycleListener | null = null;
+  private activeVideoId: string | null = null;
 
   constructor(private readonly config: AppConfig) {}
 
   onMessage(listener: MessageListener) {
     this.listener = listener;
+  }
+
+  onLifecycle(listener: LifecycleListener) {
+    this.lifecycleListener = listener;
   }
 
   async start() {
@@ -119,7 +131,12 @@ export class YoutubeChatWorker {
   private handleWorkerEvent(payload: Record<string, unknown>) {
     const type = String(payload.type ?? '');
     if (type === 'ready') {
-      logger.info('YouTube live chat connected', { videoId: payload.video_id });
+      const videoId = String(payload.video_id ?? '');
+      logger.info('YouTube live chat connected', { videoId });
+      if (videoId && videoId !== this.activeVideoId) {
+        this.activeVideoId = videoId;
+        this.lifecycleListener?.({ type: 'live_ready', videoId });
+      }
       return;
     }
     if (type === 'waiting' || type === 'starting') {
@@ -128,6 +145,9 @@ export class YoutubeChatWorker {
     }
     if (type === 'offline') {
       logger.info('YouTube live stream ended or chat closed', { videoId: payload.video_id });
+      const videoId = this.activeVideoId;
+      this.activeVideoId = null;
+      this.lifecycleListener?.({ type: 'offline', videoId });
       return;
     }
     if (type === 'chat') {

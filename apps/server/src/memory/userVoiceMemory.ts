@@ -236,6 +236,32 @@ export class UserVoiceMemoryStore {
     return result.changes > 0;
   }
 
+  findByDisplayName(displayName: string, guildId?: string | null): VoiceUserMemory | null {
+    const key = normalizeDisplayNameKey(displayName);
+    if (!key) return null;
+
+    if (guildId?.trim()) {
+      const row = this.db.prepare(`
+        SELECT guild_id, user_id, display_name, summary, relationship, concepts, archetype, updated_at
+        FROM luna_voice_user_memory
+        WHERE guild_id = ?
+          AND lower(trim(replace(replace(display_name, '@', ''), ' ', ''))) = ?
+        ORDER BY updated_at DESC
+        LIMIT 1
+      `).get(guildId.trim(), key) as VoiceUserMemoryRow | undefined;
+      return row ? mapRow(row) : null;
+    }
+
+    const row = this.db.prepare(`
+      SELECT guild_id, user_id, display_name, summary, relationship, concepts, archetype, updated_at
+      FROM luna_voice_user_memory
+      WHERE lower(trim(replace(replace(display_name, '@', ''), ' ', ''))) = ?
+      ORDER BY updated_at DESC
+      LIMIT 1
+    `).get(key) as VoiceUserMemoryRow | undefined;
+    return row ? mapRow(row) : null;
+  }
+
   close() {
     this.db.close();
   }
@@ -275,4 +301,8 @@ function mapRow(row: VoiceUserMemoryRow): VoiceUserMemory {
     archetype: row.archetype ?? '',
     updatedAt: row.updated_at
   };
+}
+
+function normalizeDisplayNameKey(displayName: string) {
+  return displayName.trim().toLowerCase().replace(/^@+/, '').replace(/\s+/g, '');
 }

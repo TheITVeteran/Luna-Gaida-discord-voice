@@ -71,40 +71,29 @@ export function emitLunaTtsAudio(
 }
 
 let discordVoiceBridgeCount = 0;
-let monitorTtsEnabled = false;
-/** Max PCM gain for monitor OBS capture (4× ≈ +12 dB, clamped to int16). */
-export const MAX_MONITOR_TTS_GAIN = 4;
-let monitorTtsVolume = MAX_MONITOR_TTS_GAIN;
+let liveChatTextRepliesEnabled = false;
 
-export function setMonitorTtsEnabled(enabled: boolean, volume = MAX_MONITOR_TTS_GAIN) {
-  monitorTtsEnabled = enabled;
-  monitorTtsVolume = Math.min(MAX_MONITOR_TTS_GAIN, Math.max(0.1, volume));
-  refreshAvatarLocalAudioMute();
+/** Enable typed replies in Discord + Twitch chat (voice stays on Fluffy Electron). */
+export function setLiveChatTextRepliesEnabled(enabled: boolean) {
+  liveChatTextRepliesEnabled = enabled;
 }
 
+export function isLiveChatTextRepliesEnabled() {
+  return liveChatTextRepliesEnabled;
+}
+
+/** @deprecated Use setLiveChatTextRepliesEnabled — monitor no longer plays audio. */
+export function setMonitorTtsEnabled(enabled: boolean, _volume?: number) {
+  setLiveChatTextRepliesEnabled(enabled);
+}
+
+/** @deprecated Use isLiveChatTextRepliesEnabled */
 export function isMonitorTtsEnabled() {
-  return monitorTtsEnabled;
-}
-
-export function getMonitorTtsVolume() {
-  return monitorTtsVolume;
-}
-
-function clampInt16(value: number) {
-  return Math.max(-32_768, Math.min(32_767, value));
-}
-
-function scaleDiscordPcm(pcm: Buffer, gain: number) {
-  if (gain === 1) return pcm;
-  const out = Buffer.allocUnsafe(pcm.length);
-  for (let offset = 0; offset < pcm.length; offset += 2) {
-    out.writeInt16LE(clampInt16(Math.round(pcm.readInt16LE(offset) * gain)), offset);
-  }
-  return out;
+  return liveChatTextRepliesEnabled;
 }
 
 export function isLunaElectronAudioMuted() {
-  return discordVoiceBridgeCount > 0 || monitorTtsEnabled;
+  return discordVoiceBridgeCount > 0;
 }
 
 function publishElectronAudioMute(muted: boolean) {
@@ -115,7 +104,7 @@ function refreshAvatarLocalAudioMute() {
   publishElectronAudioMute(isLunaElectronAudioMuted());
 }
 
-/** Mute Fluffy local playback while Luna speaks through Discord VC or monitor OBS capture (lip sync still runs). */
+/** Mute Fluffy local playback while Luna speaks through Discord VC (lip sync still runs). */
 export function setDiscordVoiceBridgeActive(active: boolean) {
   if (active) {
     discordVoiceBridgeCount += 1;
@@ -126,15 +115,10 @@ export function setDiscordVoiceBridgeActive(active: boolean) {
 }
 
 export function broadcastLunaTtsAudio(discordPcm: Buffer) {
-  if (!discordPcm.length) return;
-  const avatarMuted = isLunaElectronAudioMuted();
-  if (avatarMuted && !monitorTtsEnabled) return;
-  const pcm = monitorTtsEnabled
-    ? scaleDiscordPcm(discordPcm, monitorTtsVolume)
-    : discordPcm;
+  if (!discordPcm.length || isLunaElectronAudioMuted()) return;
   broadcastAvatarEvent({
     type: 'audio',
-    data: pcm.toString('base64'),
+    data: discordPcm.toString('base64'),
     mimeType: 'audio/pcm;rate=48000;channels=2'
   });
 }

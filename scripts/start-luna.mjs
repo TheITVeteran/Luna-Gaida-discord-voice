@@ -103,6 +103,20 @@ function spawnBackend() {
   return backendChild;
 }
 
+async function stopAvatar() {
+  return new Promise((resolve) => {
+    const child = spawn('npm', ['run', 'app:stop'], {
+      cwd: fluffyPath,
+      shell: true,
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+    child.stdout?.on('data', (chunk) => process.stdout.write(chunk));
+    child.stderr?.on('data', (chunk) => process.stderr.write(chunk));
+    child.on('exit', () => resolve());
+    child.on('error', () => resolve());
+  });
+}
+
 async function launchAvatar() {
   return new Promise((resolve, reject) => {
     const child = spawn('npm', ['run', 'app'], {
@@ -184,10 +198,17 @@ async function main() {
     await launchAvatar();
     console.log('  Fluffy avatar is running and synced to Luna.\n');
   } catch (error) {
-    console.error(error instanceof Error ? error.message : String(error));
-    console.error('If it is already open, run in the fluffy folder: npm run app:stop');
-    if (!backendAlreadyRunning) shutdown(1);
-    return;
+    console.warn('  First launch attempt failed — clearing stale avatar lock and retrying…');
+    await stopAvatar();
+    try {
+      await launchAvatar();
+      console.log('  Fluffy avatar is running and synced to Luna.\n');
+    } catch (retryError) {
+      console.error(retryError instanceof Error ? retryError.message : String(retryError));
+      console.error('If it is already open, run in the fluffy folder: npm run app:stop');
+      if (!backendAlreadyRunning) shutdown(1);
+      return;
+    }
   }
 
   if (backendAlreadyRunning) {

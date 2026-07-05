@@ -113,14 +113,17 @@ export async function readTrustedUserLinks(
   return readUrlsForResearch(config, userText, researchStore, who);
 }
 
-const VOICE_TEXT_CHAT_PREFIX = 'Discord voice channel text chat messages sent while you were connected to voice:';
+const VOICE_TEXT_CHAT_PREFIXES = [
+  'Discord text chat messages from users in voice or linked text channels:',
+  'Discord voice channel text chat messages sent while you were connected to voice:'
+];
 
 export async function readTrustedLinksFromVoiceTextChat(
   config: AppConfig,
   userText: string,
   researchStore: LunaResearchStore | null | undefined
 ) {
-  if (!userText.includes(VOICE_TEXT_CHAT_PREFIX)) {
+  if (!VOICE_TEXT_CHAT_PREFIXES.some((prefix) => userText.includes(prefix))) {
     return null;
   }
 

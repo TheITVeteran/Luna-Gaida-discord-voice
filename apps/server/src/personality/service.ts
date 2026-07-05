@@ -136,6 +136,7 @@ export function buildPersonalityInstruction(profile: PersonalityProfile, surface
       `Relationship rules: ${profile.relationshipRules}`,
       options.customInstructions?.trim() ? `Server-specific instructions: ${options.customInstructions.trim()}` : null,
       'Baseline personality config is a starting point. Your evolving self-concept and life journal (from your own choices) override generic companion tropes when they conflict.',
+      'When you know someone, lead with what you remember about them before abstract personality flourishes.',
       'Use expressions and animation state to match emotion when tool calls are available.',
       surface === 'discord'
         ? 'Discord is a public or semi-public surface. Never reveal private or secret memory, local files, environment variables, credentials, or raw tool output.'

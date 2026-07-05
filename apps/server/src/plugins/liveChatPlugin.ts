@@ -4,6 +4,11 @@ import type { PersonalityInstructionProvider } from '../personality/service.js';
 import type { AvatarTtsService } from '../live/avatarTtsService.js';
 import { logger } from '../logging/logger.js';
 import { LiveChatCoordinator } from '../liveChat/liveChatCoordinator.js';
+import type { LunaGoalsStore } from '../memory/lunaGoalsStore.js';
+import type { LunaLifeStore } from '../memory/lunaLifeStore.js';
+import type { LunaOpinionStore } from '../memory/lunaOpinionStore.js';
+import type { LunaSelfConceptStore } from '../memory/lunaSelfConceptStore.js';
+import type { UserVoiceMemoryStore } from '../memory/userVoiceMemory.js';
 import type { DiscordPlugin } from './discord/discordPlugin.js';
 
 export class LiveChatPlugin implements GiadaPlugin {
@@ -13,6 +18,13 @@ export class LiveChatPlugin implements GiadaPlugin {
   constructor(
     private readonly config: AppConfig,
     private readonly personality: PersonalityInstructionProvider,
+    private readonly memory: {
+      userVoiceMemory: UserVoiceMemoryStore;
+      lunaLife: LunaLifeStore;
+      lunaSelfConcept: LunaSelfConceptStore;
+      lunaGoals: LunaGoalsStore;
+      lunaOpinions: LunaOpinionStore;
+    },
     private readonly discord?: DiscordPlugin,
     private readonly avatarTts?: AvatarTtsService | null
   ) {}
@@ -26,6 +38,7 @@ export class LiveChatPlugin implements GiadaPlugin {
     }
 
     this.coordinator = new LiveChatCoordinator(this.config, this.personality, {
+      memory: this.memory,
       speakTts: async (text, options) => {
         if (this.avatarTts) {
           await this.avatarTts.speakLine(text, { publish: true, ...options });
@@ -35,7 +48,8 @@ export class LiveChatPlugin implements GiadaPlugin {
           return true;
         }
         return false;
-      }
+      },
+      postDiscordText: async (text) => this.discord?.postLiveChatTextReply(text) ?? false
     });
     await this.coordinator.start();
     logger.info('Live chat plugin started', {

@@ -40,6 +40,7 @@ import type { GiadaPlugin } from '../plugin.js';
 import { logger } from '../../logging/logger.js';
 import { publishActivity } from '../../monitor/activityFeed.js';
 import { DiscordSettingsStore } from './settings.js';
+import { isDiscordTtsTextChannelMessage } from './discordTtsTextChannels.js';
 import {
   DiscordTextResponder,
   type DiscordAttachmentSummary,
@@ -268,7 +269,11 @@ export class DiscordPlugin implements GiadaPlugin {
       personality,
       (guildId, channelId) => this.getMusicControllerForChannel(guildId, channelId),
       platform,
-      userVoiceMemory
+      userVoiceMemory,
+      lunaLife,
+      lunaSelfConcept,
+      lunaGoals,
+      lunaOpinions
     );
   }
 
@@ -401,6 +406,7 @@ export class DiscordPlugin implements GiadaPlugin {
       }
       void this.registerCommands();
       void this.synchronizePlatformGuilds();
+      void this.ensureConfiguredDiscordTtsVoiceWatch();
       void this.restoreWatchedVoiceConnections();
       void this.initializeWatchedTextSessions();
       this.startVoiceWatchReconciliation();
@@ -907,10 +913,42 @@ export class DiscordPlugin implements GiadaPlugin {
     if (!bridge) {
       return null;
     }
-    if (isVoiceTextChannelMessage(message, voiceChannelId)) {
+    if (isDiscordTtsTextChannelMessage(
+      message.channelId,
+      voiceChannelId,
+      this.config.lunaDiscordTtsTextChannelIds,
+      {
+        threadParentId: getThreadParentId(message.channel),
+        channelParentId: getChannelParentId(message.channel)
+      }
+    )) {
       return bridge;
     }
     return null;
+  }
+
+  private async ensureConfiguredDiscordTtsVoiceWatch() {
+    const channelIds = this.config.lunaDiscordTtsTextChannelIds;
+    if (!channelIds.length || !this.client) {
+      return;
+    }
+    for (const guild of this.client.guilds.cache.values()) {
+      for (const channelId of channelIds) {
+        const channel = await guild.channels.fetch(channelId).catch(() => null);
+        if (!channel?.isVoiceBased?.()) {
+          continue;
+        }
+        const settings = this.settings.get(guild.id);
+        if (settings.voiceWatchChannelIds.includes(channelId)) {
+          continue;
+        }
+        this.settings.addVoiceWatchChannel(guild.id, channelId);
+        logger.info('Auto-enabled Discord voice watch for TTS text channel', {
+          guildId: guild.id,
+          channelId
+        });
+      }
+    }
   }
 
   private async isMessageChannelNsfw(message: Message) {
@@ -2649,6 +2687,33 @@ export class DiscordPlugin implements GiadaPlugin {
     return bridge.speakLiveChatLine(text, options);
   }
 
+  async postLiveChatTextReply(text: string) {
+    const normalized = text.replace(/\s+/g, ' ').trim();
+    if (!normalized || !this.client) {
+      return false;
+    }
+    const channelIds = this.config.lunaDiscordTtsTextChannelIds;
+    if (!channelIds.length) {
+      return false;
+    }
+    for (const channelId of channelIds) {
+      try {
+        const channel = await this.client.channels.fetch(channelId);
+        if (!channel?.isTextBased() || !('send' in channel) || typeof channel.send !== 'function') {
+          continue;
+        }
+        await channel.send(normalized.slice(0, 2000));
+        return true;
+      } catch (error) {
+        logger.warn('Could not post live chat text to Discord channel', {
+          channelId,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+    return false;
+  }
+
   private helpText() {
     return [
       '`/play query:<song or YouTube link>` - join your voice channel and play music via yt-dlp.',
@@ -2806,9 +2871,10 @@ function hasBooleanNsfw(value: unknown): value is { nsfw: boolean } {
 }
 
 function isVoiceTextChannelMessage(message: Message, voiceChannelId: string) {
-  return message.channelId === voiceChannelId
-    || getThreadParentId(message.channel) === voiceChannelId
-    || getChannelParentId(message.channel) === voiceChannelId;
+  return isDiscordTtsTextChannelMessage(message.channelId, voiceChannelId, [], {
+    threadParentId: getThreadParentId(message.channel),
+    channelParentId: getChannelParentId(message.channel)
+  });
 }
 
 function voiceBridgeKey(guildId: string, channelId: string) {

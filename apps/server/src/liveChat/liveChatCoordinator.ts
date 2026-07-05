@@ -1,15 +1,22 @@
 import type { AppConfig } from '../config/env.js';
+import { isLiveChatTextRepliesEnabled } from '../live/lunaTtsOutput.js';
 import type { PersonalityInstructionProvider } from '../personality/service.js';
 import { publishActivity } from '../monitor/activityFeed.js';
 import { logger } from '../logging/logger.js';
-import { LiveChatBrain } from './liveChatBrain.js';
+import { LiveChatBrain, type LiveChatMemoryDeps } from './liveChatBrain.js';
 import {
   formatLiveChatBatchPrompt,
   liveChatBatchFlushDelayMs,
   uniqueViewerNames
 } from './liveChatBatch.js';
+import {
+  shouldSkipIntro,
+  YoutubeLiveStreamSession
+} from './liveStreamSession.js';
 import { TwitchChatClient } from './twitchChatClient.js';
 import { YoutubeChatWorker } from './youtubeChatWorker.js';
+
+const YOUTUBE_OFFLINE_GRACE_MS = 25_000;
 
 type Platform = 'twitch' | 'youtube';
 
@@ -22,6 +29,8 @@ interface IncomingChatMessage {
 
 export interface LiveChatCoordinatorOptions {
   speakTts?: (text: string, options?: { displayText?: string }) => Promise<boolean>;
+  postDiscordText?: (text: string) => Promise<boolean>;
+  memory: LiveChatMemoryDeps;
 }
 
 export class LiveChatCoordinator {
@@ -35,21 +44,27 @@ export class LiveChatCoordinator {
   private lastReplyEndedAt = 0;
   private started = false;
   private youtubeRestartTimer: ReturnType<typeof setTimeout> | null = null;
+  private youtubeOfflineTimer: ReturnType<typeof setTimeout> | null = null;
+  private youtubeSession: YoutubeLiveStreamSession | null = null;
   private warnedLiveTts = false;
+  private warnedYoutubeChatText = false;
 
   constructor(
     private readonly config: AppConfig,
     personality: PersonalityInstructionProvider,
-    private readonly options: LiveChatCoordinatorOptions = {}
+    private readonly options: LiveChatCoordinatorOptions
   ) {
     this.twitch = new TwitchChatClient(config);
     this.youtube = new YoutubeChatWorker(config);
-    this.brain = new LiveChatBrain(config, personality);
+    this.brain = new LiveChatBrain(config, personality, options.memory);
     this.twitch.onMessage((message) => {
       void this.handleMessage(message);
     });
     this.youtube.onMessage((message) => {
       void this.handleMessage(message);
+    });
+    this.youtube.onLifecycle((event) => {
+      void this.handleYoutubeLifecycle(event);
     });
   }
 
@@ -81,6 +96,12 @@ export class LiveChatCoordinator {
       clearTimeout(this.youtubeRestartTimer);
       this.youtubeRestartTimer = null;
     }
+    if (this.youtubeOfflineTimer) {
+      clearTimeout(this.youtubeOfflineTimer);
+      this.youtubeOfflineTimer = null;
+    }
+    this.youtubeSession?.clearOutroTimer();
+    this.youtubeSession = null;
     await Promise.allSettled([this.twitch.close(), this.youtube.close()]);
   }
 
@@ -197,6 +218,8 @@ export class LiveChatCoordinator {
         text: message.text
       }));
 
+      const names = uniqueViewerNames(viewerLines);
+
       const reply = batch.length === 1
         ? await this.brain.generateReply(platform, batch[0]!.author, batch[0]!.text)
         : await this.brain.generateBatchReply(platform, viewerLines);
@@ -204,10 +227,14 @@ export class LiveChatCoordinator {
       if (!reply) {
         logger.warn('Live chat brain returned no reply', {
           platform,
-          viewers: uniqueViewerNames(viewerLines),
+          viewers: names,
           count: batch.length
         });
         return;
+      }
+
+      if (platform === 'youtube' && this.youtubeSession) {
+        this.youtubeSession.noteViewers(names);
       }
 
       const wantsTts = platform === 'youtube'
@@ -226,11 +253,8 @@ export class LiveChatCoordinator {
         }
       }
 
-      if (platform === 'twitch' && this.config.twitchChatReply) {
-        await this.twitch.reply(reply.displayText);
-      }
+      await this.postChatTextReplies(platform, reply.displayText);
 
-      const names = uniqueViewerNames(viewerLines);
       publishActivity({
         level: 'assistant',
         title: batch.length > 1
@@ -244,7 +268,7 @@ export class LiveChatCoordinator {
           to: names.join(', '),
           batchSize: batch.length,
           mode: wantsTts ? 'tts' : 'chat',
-          ...(this.config.twitchChatReply && platform === 'twitch' ? { twitchChat: true } : {})
+          chatText: this.wantsChatTextReply(platform)
         }
       });
     } catch (error) {
@@ -286,6 +310,219 @@ export class LiveChatCoordinator {
       return normalized.includes('?') ? null : 'trigger_question';
     }
     return /\bluna\b/i.test(normalized) ? null : 'trigger_luna';
+  }
+
+  private handleYoutubeLifecycle(event: { type: 'live_ready' | 'offline'; videoId: string | null }) {
+    if (event.type === 'live_ready') {
+      this.cancelYoutubeOfflineGrace();
+      if (event.videoId) {
+        void this.onYoutubeLiveReady(event.videoId);
+      }
+      return;
+    }
+    this.scheduleYoutubeOffline(event.videoId);
+  }
+
+  private cancelYoutubeOfflineGrace() {
+    if (this.youtubeOfflineTimer) {
+      clearTimeout(this.youtubeOfflineTimer);
+      this.youtubeOfflineTimer = null;
+    }
+  }
+
+  private scheduleYoutubeOffline(videoId: string | null) {
+    this.cancelYoutubeOfflineGrace();
+    this.youtubeOfflineTimer = setTimeout(() => {
+      this.youtubeOfflineTimer = null;
+      void this.onYoutubeLiveOffline(videoId);
+    }, YOUTUBE_OFFLINE_GRACE_MS);
+    this.youtubeOfflineTimer.unref?.();
+  }
+
+  private async onYoutubeLiveReady(videoId: string) {
+    if (shouldSkipIntro(this.youtubeSession, videoId)) {
+      logger.info('YouTube live chat reconnected (same stream)', { videoId });
+      return;
+    }
+
+    if (this.youtubeSession && this.youtubeSession.videoId !== videoId) {
+      await this.maybePlayStreamOutro('stream_change');
+      this.youtubeSession.clearOutroTimer();
+      this.youtubeSession = null;
+    }
+
+    const session = new YoutubeLiveStreamSession(videoId);
+    this.youtubeSession = session;
+
+    publishActivity({
+      level: 'success',
+      title: 'YouTube stream live',
+      detail: `Broadcast ${videoId} — Luna is on air`,
+      meta: { videoId, platform: 'youtube' }
+    });
+
+    if (this.config.youtubeLiveIntro) {
+      this.replyChain = this.replyChain
+        .then(() => this.playStreamIntro(session))
+        .catch((error) => {
+          logger.warn('YouTube stream intro failed', {
+            error: error instanceof Error ? error.message : String(error)
+          });
+        });
+    } else {
+      session.introDone = true;
+    }
+
+    if (this.config.youtubeLiveOutro) {
+      const outroMs = this.config.youtubeLiveOutroAfterMin * 60_000;
+      session.scheduleOutro(outroMs, () => {
+        this.replyChain = this.replyChain
+          .then(() => this.maybePlayStreamOutro('scheduled'))
+          .catch((error) => {
+            logger.warn('YouTube scheduled stream outro failed', {
+              error: error instanceof Error ? error.message : String(error)
+            });
+          });
+      });
+    }
+  }
+
+  private async onYoutubeLiveOffline(videoId: string | null) {
+    const session = this.youtubeSession;
+    if (!session) return;
+    if (videoId && session.videoId !== videoId) return;
+
+    publishActivity({
+      level: 'info',
+      title: 'YouTube stream ended',
+      detail: session.videoId,
+      meta: { videoId: session.videoId, platform: 'youtube' }
+    });
+
+    session.clearOutroTimer();
+    const elapsedMin = session.elapsedMinutes();
+    if (
+      this.config.youtubeLiveOutro
+      && !session.outroDone
+      && elapsedMin >= this.config.youtubeLiveOutroAfterMin
+    ) {
+      await this.replyChain.then(() => this.maybePlayStreamOutro('stream_end'));
+    }
+
+    this.youtubeSession = null;
+  }
+
+  private async playStreamIntro(session: YoutubeLiveStreamSession) {
+    if (session.introDone || session.outroDone) return;
+
+    const reply = await this.brain.generateStreamIntro('youtube');
+    if (!reply) {
+      logger.warn('YouTube stream intro generation returned empty');
+      session.introDone = true;
+      return;
+    }
+
+    await this.speakLiveChatLine('youtube', reply, {
+      activityTitle: 'Luna stream intro (YouTube)',
+      meta: { segment: 'intro', videoId: session.videoId }
+    });
+    session.introDone = true;
+  }
+
+  private async maybePlayStreamOutro(reason: 'scheduled' | 'stream_end' | 'stream_change') {
+    const session = this.youtubeSession;
+    if (!session || session.outroDone || !this.config.youtubeLiveOutro) return;
+
+    session.outroDone = true;
+    session.clearOutroTimer();
+
+    const viewers = session.getViewers();
+    const streamMinutes = session.elapsedMinutes();
+    const reply = await this.brain.generateStreamOutro('youtube', viewers, streamMinutes);
+    if (!reply) {
+      logger.warn('YouTube stream outro generation returned empty', { reason });
+      return;
+    }
+
+    await this.speakLiveChatLine('youtube', reply, {
+      activityTitle: reason === 'scheduled'
+        ? 'Luna stream outro (YouTube · 2h)'
+        : 'Luna stream outro (YouTube · sign-off)',
+      meta: {
+        segment: 'outro',
+        reason,
+        videoId: session.videoId,
+        viewers: viewers.length,
+        streamMinutes
+      }
+    });
+  }
+
+  private async speakLiveChatLine(
+    platform: 'youtube' | 'twitch',
+    reply: { ttsText: string; displayText: string },
+    options: { activityTitle: string; meta?: Record<string, unknown> }
+  ) {
+    const wantsTts = platform === 'youtube' ? this.config.youtubeTts : this.config.twitchTts;
+    if (wantsTts) {
+      const spoke = await this.options.speakTts?.(reply.ttsText, { displayText: reply.displayText }) ?? false;
+      if (!spoke && !this.warnedLiveTts) {
+        this.warnedLiveTts = true;
+        logger.warn('Live chat TTS skipped', { platform, segment: options.meta?.segment });
+        publishActivity({
+          level: 'warn',
+          title: `${platform} TTS unavailable`,
+          detail: 'Segment was generated but could not be spoken. Open Fluffy (Electron) or join Luna to a Discord voice channel.'
+        });
+      }
+    }
+
+    publishActivity({
+      level: 'assistant',
+      title: options.activityTitle,
+      detail: reply.displayText,
+      meta: { platform, mode: wantsTts ? 'tts' : 'text', ...options.meta }
+    });
+
+    await this.postChatTextReplies(platform, reply.displayText);
+  }
+
+  private wantsChatTextReply(platform: Platform) {
+    if (isLiveChatTextRepliesEnabled()) {
+      return true;
+    }
+    return platform === 'twitch' && this.config.twitchChatReply;
+  }
+
+  private async postChatTextReplies(platform: Platform, text: string) {
+    const normalized = text.replace(/\s+/g, ' ').trim();
+    if (!normalized || !this.wantsChatTextReply(platform)) {
+      return;
+    }
+
+    if (platform === 'twitch') {
+      await this.twitch.reply(normalized);
+    }
+
+    if (platform === 'youtube' && isLiveChatTextRepliesEnabled() && !this.warnedYoutubeChatText) {
+      this.warnedYoutubeChatText = true;
+      logger.info('YouTube live chat is read-only — voice reply only (Fluffy Electron)');
+      publishActivity({
+        level: 'info',
+        title: 'YouTube chat text',
+        detail: 'YouTube live chat cannot be typed into from Luna. Replies are spoken on stream via Fluffy.'
+      });
+    }
+
+    if (isLiveChatTextRepliesEnabled()) {
+      try {
+        await this.options.postDiscordText?.(normalized);
+      } catch (error) {
+        logger.warn('Discord live chat text reply failed', {
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
   }
 }
 

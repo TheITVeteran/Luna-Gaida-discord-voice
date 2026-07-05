@@ -16,74 +16,6 @@ let recording = false;
 let ttsEnabled = false;
 let ttsSocket = null;
 
-class LunaMonitorAudio {
-  constructor() {
-    this.context = new AudioContext({ sampleRate: 48_000 });
-    this.nextPlayTime = 0;
-    this.generation = 0;
-    this.queue = Promise.resolve();
-    this.playbackGain = 1;
-  }
-
-  async unlock() {
-    if (this.context.state === 'suspended') {
-      await this.context.resume();
-    }
-    return this.context.state === 'running';
-  }
-
-  enqueueBase64Pcm(base64) {
-    const generation = ++this.generation;
-    this.queue = this.queue.then(() => this.playBase64Pcm(base64, generation));
-    return this.queue;
-  }
-
-  async playBase64Pcm(base64, generation) {
-    if (!base64 || generation !== this.generation || !ttsEnabled) return;
-    if (this.context.state === 'suspended') {
-      await this.context.resume();
-    }
-    const binary = atob(base64);
-    const bytes = new Uint8Array(binary.length);
-    for (let index = 0; index < binary.length; index += 1) {
-      bytes[index] = binary.charCodeAt(index);
-    }
-    const int16 = new Int16Array(bytes.buffer);
-    const frameCount = Math.floor(int16.length / 2);
-    if (frameCount <= 0) return;
-
-    const left = new Float32Array(frameCount);
-    const right = new Float32Array(frameCount);
-    for (let index = 0; index < frameCount; index += 1) {
-      left[index] = (int16[index * 2] ?? 0) / 32_768;
-      right[index] = (int16[index * 2 + 1] ?? 0) / 32_768;
-    }
-
-    const audioBuffer = this.context.createBuffer(2, frameCount, 48_000);
-    audioBuffer.getChannelData(0).set(left);
-    audioBuffer.getChannelData(1).set(right);
-
-    const source = this.context.createBufferSource();
-    const gain = this.context.createGain();
-    source.buffer = audioBuffer;
-    source.connect(gain);
-    gain.gain.value = this.playbackGain;
-    gain.connect(this.context.destination);
-
-    const scheduled = Math.max(this.context.currentTime, this.nextPlayTime);
-    source.start(scheduled);
-    this.nextPlayTime = scheduled + audioBuffer.duration;
-
-    await new Promise((resolve) => {
-      source.onended = () => {
-        if (generation === this.generation) resolve();
-      };
-    });
-  }
-}
-
-const monitorAudio = new LunaMonitorAudio();
-
 function connectTtsStream() {
   if (ttsSocket && (ttsSocket.readyState === WebSocket.OPEN || ttsSocket.readyState === WebSocket.CONNECTING)) {
     return;
@@ -101,10 +33,6 @@ function connectTtsStream() {
       return;
     }
     if (!ttsEnabled) return;
-    if (event.type === 'audio') {
-      void monitorAudio.enqueueBase64Pcm(event.data);
-      return;
-    }
     if (event.type === 'transcript' && event.text?.trim()) {
       appendConversationLine(event.speaker === 'user' ? 'user' : 'assistant', event.text.trim());
     }
@@ -118,25 +46,14 @@ function connectTtsStream() {
 }
 
 async function enableTts() {
-  const running = await monitorAudio.unlock();
-  if (!running) {
-    ttsBtn.textContent = 'Could not unlock audio — try again';
-    return;
-  }
   try {
-    const response = await fetch('/monitor/tts/enable', { method: 'POST' });
-    const payload = await response.json();
-    if (payload?.gain != null) {
-      monitorAudio.playbackGain = 1;
-    } else if (payload?.volume != null) {
-      monitorAudio.playbackGain = 1;
-    }
+    await fetch('/monitor/tts/enable', { method: 'POST' });
   } catch {
-    monitorAudio.playbackGain = 1;
+    // overlay still works from websocket transcripts
   }
   ttsEnabled = true;
   lunaConversation.classList.remove('hidden');
-  ttsBtn.textContent = 'Luna voice + text enabled (max volume)';
+  ttsBtn.textContent = 'Luna chat text replies enabled';
   ttsBtn.classList.add('enabled');
   ttsBtn.disabled = true;
   connectTtsStream();

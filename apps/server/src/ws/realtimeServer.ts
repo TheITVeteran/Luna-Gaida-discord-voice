@@ -4,7 +4,7 @@ import { z } from 'zod';
 import type { LiveSurface } from '../live/liveSession.js';
 import type { LiveClientEvent, LiveInputEvent } from '../live/liveSession.js';
 import { logger } from '../logging/logger.js';
-import { isLunaElectronAudioMuted, isMonitorTtsEnabled } from '../live/lunaTtsOutput.js';
+import { isLunaElectronAudioMuted } from '../live/lunaTtsOutput.js';
 import { setAvatarBroadcaster } from './avatarBroadcast.js';
 
 type AvatarSocketRole = 'avatar' | 'monitor' | 'live';
@@ -90,7 +90,7 @@ export function attachRealtimeServer(
       if (socket.readyState !== WebSocket.OPEN) continue;
       if (event.type === 'audio') {
         const role = socketRoles.get(socket) ?? 'live';
-        if (isMonitorTtsEnabled() && role !== 'monitor') {
+        if (role === 'monitor') {
           continue;
         }
       }
@@ -173,9 +173,10 @@ export function attachRealtimeServer(
             const syncReason = parsed.role === 'monitor' ? 'monitor_sync' : 'avatar_sync';
             socket.send(JSON.stringify({ type: 'status', status: 'connected', reason: syncReason }));
             socket.send(JSON.stringify({ type: 'avatar.state', payload: { state: 'idle' } }));
-            if (isLunaElectronAudioMuted()) {
-              socket.send(JSON.stringify({ type: 'avatar.local_audio', payload: { muted: true } }));
-            }
+            socket.send(JSON.stringify({
+              type: 'avatar.local_audio',
+              payload: { muted: isLunaElectronAudioMuted() }
+            }));
             return;
           }
 
