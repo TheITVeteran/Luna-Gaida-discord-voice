@@ -1,5 +1,5 @@
 import type { AppConfig } from '../config/env.js';
-import { stripModelArtifacts } from '../live/voiceReply.js';
+import { stripLeakedPromptFromReply, stripModelArtifacts } from '../live/voiceReply.js';
 import { ensureOllamaReady, formatOllamaFetchError } from './ollamaHealth.js';
 
 interface ChatMessage {
@@ -42,10 +42,14 @@ export class OllamaTextClient {
         model: this.config.ollamaModel,
         messages,
         temperature: input.temperature ?? 0.8,
-        max_completion_tokens: input.maxCompletionTokens ?? 2048,
+        max_tokens: input.maxCompletionTokens ?? 256,
+        max_completion_tokens: input.maxCompletionTokens ?? 256,
         reasoning_effort: this.config.ollamaReasoningEffort,
         chat_template_kwargs: {
           enable_thinking: this.config.ollamaReasoningEffort !== 'none'
+        },
+        options: {
+          num_predict: input.maxCompletionTokens ?? 256
         }
       }),
       signal: AbortSignal.timeout(this.config.ollamaTimeoutMs)
@@ -65,7 +69,10 @@ export class OllamaTextClient {
       throw new Error(`Ollama HTTP ${response.status}: ${payload.error?.message ?? raw.slice(0, 300)}`);
     }
 
-    const text = extractAssistantText(payload.choices?.[0]?.message);
+    const text = extractAssistantText(
+      payload.choices?.[0]?.message,
+      this.config.ollamaReasoningEffort !== 'none'
+    );
     if (!text) {
       throw new Error('Ollama returned no text');
     }
@@ -284,15 +291,21 @@ function extractJsonObject(text: string) {
   return null;
 }
 
-function extractAssistantText(message: { content?: string | null; reasoning?: string | null } | undefined) {
+function extractAssistantText(
+  message: { content?: string | null; reasoning?: string | null } | undefined,
+  allowReasoningFallback = false
+) {
   const content = message?.content?.trim();
   if (content) {
-    const stripped = stripModelArtifacts(content);
+    const stripped = stripLeakedPromptFromReply(stripModelArtifacts(content));
     if (stripped) return stripped;
   }
+  if (!allowReasoningFallback) return '';
   const reasoning = message?.reasoning?.trim();
   if (!reasoning) return '';
-  const withoutThinking = stripModelArtifacts(reasoning.replace(/^Thinking Process:\s*/i, '').trim());
+  const withoutThinking = stripLeakedPromptFromReply(
+    stripModelArtifacts(reasoning.replace(/^Thinking Process:\s*/i, '').trim())
+  );
   return withoutThinking.split('\n').find((line) => line.trim())?.trim() ?? withoutThinking.slice(0, 500);
 }
 

@@ -104,6 +104,19 @@ function refreshAvatarLocalAudioMute() {
   publishElectronAudioMute(isLunaElectronAudioMuted());
 }
 
+/** Temporarily unmute Fluffy for avatar/live-chat TTS while Discord VC is active. */
+export function beginAvatarTtsPlayback() {
+  if (!isLunaElectronAudioMuted()) {
+    return () => undefined;
+  }
+  publishElectronAudioMute(false);
+  return () => {
+    if (discordVoiceBridgeCount > 0) {
+      publishElectronAudioMute(true);
+    }
+  };
+}
+
 /** Mute Fluffy local playback while Luna speaks through Discord VC (lip sync still runs). */
 export function setDiscordVoiceBridgeActive(active: boolean) {
   if (active) {
@@ -114,8 +127,9 @@ export function setDiscordVoiceBridgeActive(active: boolean) {
   refreshAvatarLocalAudioMute();
 }
 
-export function broadcastLunaTtsAudio(discordPcm: Buffer) {
-  if (!discordPcm.length || isLunaElectronAudioMuted()) return;
+export function broadcastLunaTtsAudio(discordPcm: Buffer, options?: { bypassDiscordMute?: boolean }) {
+  if (!discordPcm.length) return;
+  if (!options?.bypassDiscordMute && isLunaElectronAudioMuted()) return;
   broadcastAvatarEvent({
     type: 'audio',
     data: discordPcm.toString('base64'),

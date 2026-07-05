@@ -12,6 +12,7 @@ import {
   readTrustedLinksFromVoiceTextChat,
   readUrlsForResearch
 } from '../research/trustedLinkSharing.js';
+import { buildSpokenOutputRule, wrapSilentContext } from './voiceReply.js';
 import { logger } from '../logging/logger.js';
 
 const URL_RE = /https?:\/\/[^\s<>"')]+/i;
@@ -44,7 +45,7 @@ export async function buildMessageResearchBlock(
   });
   if (other) parts.push(other);
 
-  return parts.length ? parts.join('\n\n') : null;
+  return parts.length ? wrapSilentContext(parts.join('\n\n')) : null;
 }
 
 export async function maybeResearchForUserMessage(

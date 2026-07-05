@@ -20,6 +20,7 @@ import {
 } from './relationshipArchetype.js';
 import { analyzeUserSocialTone, buildSocialTonePromptBlock } from './socialTone.js';
 import type { UserVoiceMemoryStore, VoiceUserMemory } from './userVoiceMemory.js';
+import { wrapSilentContext } from '../live/voiceReply.js';
 
 export function buildCallerFirstRule() {
   return [
@@ -159,15 +160,15 @@ export function buildCallerContextBlocks(input: CallerContextInput): CallerPromp
 
   return {
     callerFirstRule: buildCallerFirstRule(),
-    memoryBlock,
-    conceptBlock,
-    relationshipBlock,
-    absenceBlock,
-    socialToneBlock,
-    lifeBlock,
-    selfConceptBlock,
-    goalsBlock,
-    opinionsBlock,
+    memoryBlock: wrapSilentContext(memoryBlock),
+    conceptBlock: wrapSilentContext(conceptBlock),
+    relationshipBlock: wrapSilentContext(relationshipBlock),
+    absenceBlock: wrapSilentContext(absenceBlock),
+    socialToneBlock: wrapSilentContext(socialToneBlock),
+    lifeBlock: wrapSilentContext(lifeBlock),
+    selfConceptBlock: wrapSilentContext(selfConceptBlock),
+    goalsBlock: wrapSilentContext(goalsBlock),
+    opinionsBlock: wrapSilentContext(opinionsBlock),
     record,
     resolvedGuildId
   };
@@ -197,7 +198,7 @@ export function buildBatchCallerContextBlock(
     ].filter(Boolean);
     lines.push(`- ${viewer}: ${bits.join(' | ')}`);
   }
-  return lines.join('\n');
+  return wrapSilentContext(lines.join('\n'));
 }
 
 function normalizeCallerName(value: string) {

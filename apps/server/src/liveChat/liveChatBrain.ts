@@ -13,7 +13,7 @@ import type { UserVoiceMemoryStore } from '../memory/userVoiceMemory.js';
 import { OllamaTextClient } from '../providers/ollamaText.js';
 import { FISH_AUDIO_EXPRESSION_PROMPT } from '../live/fishAudioExpressions.js';
 import { applyVoiceActionsToReply } from '../live/voiceActions.js';
-import { sanitizeVoiceReply } from '../live/voiceReply.js';
+import { finalizeSpokenReply, buildLunaTurnUserPrompt, buildSpokenOutputRule, MAX_LIVE_CHAT_SPOKEN_CHARS } from '../live/voiceReply.js';
 import {
   formatLiveChatBatchPrompt,
   uniqueViewerNames,
@@ -120,27 +120,8 @@ export class LiveChatBrain {
       ? buildBatchCallerContextBlock(this.memory.userVoiceMemory, this.config, input.viewers, guildId)
       : null;
 
-    const system = [
-      this.personality.buildInstruction('desktop', { nsfwAllowed: true }),
+    const backgroundContext = [
       buildCallerFirstRule(),
-      'You are Luna replying in a live stream chat.',
-      platform === 'youtube'
-        ? 'YouTube chat is read aloud on stream via TTS — never type in YouTube chat.'
-        : 'Twitch chat is read aloud on stream via TTS in the Fluffy avatar. Do not assume your words appear in Twitch chat unless asked.',
-      input.mode === 'single'
-        ? (this.useFishTts
-          ? 'Keep replies short: one or two sentences, under 220 characters of spoken words (tags do not count). Use Fish bracket tags for emotion, pitch, pace, and tone.'
-          : 'Keep replies short: one or two sentences, under 220 characters.')
-        : batchBlock,
-      'Be in character, warm and witty. No markdown.',
-      'Name the viewer and reference what you know about them before anything else.',
-      this.useFishTts
-        ? 'Use *asterisk actions* for avatar motion and mirror the feeling with Fish tags in the spoken line.'
-        : 'No asterisk stage directions.',
-      'Do not say you are an AI or bot. Your name is Luna.',
-      fishExpressionBlock,
-      `Platform: ${platform}.`,
-      input.mode === 'single' ? `Viewer: ${input.author}.` : `Viewers: ${input.viewers.join(', ')}.`,
       callerContext?.memoryBlock,
       callerContext?.conceptBlock,
       callerContext?.relationshipBlock,
@@ -151,6 +132,29 @@ export class LiveChatBrain {
       callerContext?.selfConceptBlock,
       callerContext?.goalsBlock,
       callerContext?.opinionsBlock
+    ].filter(Boolean).join('\n\n');
+
+    const system = [
+      this.personality.buildInstruction('desktop', { nsfwAllowed: true }),
+      buildSpokenOutputRule(),
+      'You are Luna replying in a live stream chat.',
+      platform === 'youtube'
+        ? 'YouTube chat is read aloud on stream via TTS — never type in YouTube chat.'
+        : 'Twitch chat is read aloud on stream via TTS in the Fluffy avatar.',
+      input.mode === 'single'
+        ? (this.useFishTts
+          ? 'Keep replies short: one or two sentences, under 220 characters of spoken words (tags do not count).'
+          : 'Keep replies short: one or two sentences, under 220 characters.')
+        : batchBlock,
+      'Be in character, warm and witty. No markdown.',
+      'Name the viewer and reference what you know about them before anything else.',
+      this.useFishTts
+        ? 'Use *asterisk actions* for avatar motion and mirror the feeling with Fish tags in the spoken line.'
+        : 'No asterisk stage directions.',
+      'Do not say you are an AI or bot. Your name is Luna.',
+      fishExpressionBlock,
+      `Platform: ${platform}.`,
+      input.mode === 'single' ? `Viewer: ${input.author}.` : `Viewers: ${input.viewers.join(', ')}.`
     ].filter(Boolean).join('\n');
 
     const historyBlock = this.history
@@ -158,27 +162,26 @@ export class LiveChatBrain {
       .map((entry) => `${entry.role === 'user' ? 'Viewer' : 'Luna'}: ${entry.content}`)
       .join('\n');
 
-    const prompt = input.mode === 'batch'
-      ? [
-        historyBlock,
-        'Multiple viewers just spoke:',
-        input.text,
-        'Give one combined on-stream reply that names them and covers their messages.'
-      ].filter(Boolean).join('\n')
-      : historyBlock
-        ? `${historyBlock}\nViewer ${input.author}: ${input.text}`
-        : `Viewer ${input.author}: ${input.text}`;
+    const currentMessage = input.mode === 'batch'
+      ? `Multiple viewers just spoke:\n${input.text}\nGive one combined on-stream reply that names them and covers their messages.`
+      : `Viewer ${input.author}: ${input.text}`;
+
+    const prompt = buildLunaTurnUserPrompt({
+      background: backgroundContext,
+      conversation: historyBlock,
+      currentMessage
+    });
 
     const raw = await this.ollama.generate({
       system,
       userText: prompt,
       maxCompletionTokens: input.mode === 'batch'
-        ? (this.useFishTts ? 260 : 200)
-        : (this.useFishTts ? 180 : 120),
-      temperature: 0.62
+        ? (this.useFishTts ? 200 : 160)
+        : (this.useFishTts ? 140 : 100),
+      temperature: 0.55
     });
 
-    const cleaned = sanitizeVoiceReply(raw);
+    const cleaned = finalizeSpokenReply(raw, input.mode === 'batch' ? 320 : MAX_LIVE_CHAT_SPOKEN_CHARS);
     if (!cleaned) return null;
 
     const { ttsText, displayText } = applyVoiceActionsToReply(cleaned, { fishTts: this.useFishTts });
@@ -261,7 +264,7 @@ export class LiveChatBrain {
   }
 
   private finalizeProactiveReply(raw: string, maxChars: number): LiveChatReply | null {
-    const cleaned = sanitizeVoiceReply(raw);
+    const cleaned = finalizeSpokenReply(raw, maxChars);
     if (!cleaned) return null;
 
     const { ttsText, displayText } = applyVoiceActionsToReply(cleaned, { fishTts: this.useFishTts });

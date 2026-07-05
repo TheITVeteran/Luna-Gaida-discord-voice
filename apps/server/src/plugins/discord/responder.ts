@@ -15,6 +15,7 @@ import type { AppConfig } from '../../config/env.js';
 import type { MemoryStore } from '../../memory/types.js';
 import type { UserVoiceMemoryStore } from '../../memory/userVoiceMemory.js';
 import { buildCallerContextBlocks, buildCallerFirstRule } from '../../memory/callerContext.js';
+import { buildSpokenOutputRule } from '../../live/voiceReply.js';
 import type { LunaGoalsStore } from '../../memory/lunaGoalsStore.js';
 import type { LunaLifeStore } from '../../memory/lunaLifeStore.js';
 import type { LunaOpinionStore } from '../../memory/lunaOpinionStore.js';
@@ -213,6 +214,7 @@ export class DiscordTextResponder {
       callerContext?.selfConceptBlock,
       callerContext?.goalsBlock,
       callerContext?.opinionsBlock,
+      buildSpokenOutputRule(),
       buildDiscordApplicationEmojiInstruction(this.applicationEmojis),
       provider.runtime.features.webSearch
         ? 'When you need current web information, links, documentation, or news, use the searchWeb tool. Do not rely on provider Google Search grounding.'

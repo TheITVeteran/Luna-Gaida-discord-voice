@@ -11,7 +11,13 @@ import { logger } from '../logging/logger.js';
 import { ConversationHistory } from './conversationHistory.js';
 import { LocalVoiceService, resolveLocalVoicePaths, type LocalVoiceServiceConfig } from './localVoiceService.js';
 import { parseWakePhrases, evaluateWakePhrase, isLikelyEchoTranscript } from './wakePhrase.js';
-import { isLikelyNonsenseTranscript, sanitizeVoiceReply } from './voiceReply.js';
+import {
+  isLikelyNonsenseTranscript,
+  finalizeSpokenReply,
+  buildLunaTurnUserPrompt,
+  buildSpokenOutputRule,
+  wrapSilentContext
+} from './voiceReply.js';
 import type { LiveClientEvent, LiveInputEvent, LiveSurface, VoiceSpeakerContext } from './liveSession.js';
 import { UserVoiceMemoryStore } from '../memory/userVoiceMemory.js';
 import { LunaLifeStore } from '../memory/lunaLifeStore.js';
@@ -579,7 +585,7 @@ export class LocalVoiceSessionManager {
         return;
       }
 
-      const cleaned = sanitizeVoiceReply(decision.line);
+      const cleaned = finalizeSpokenReply(decision.line);
       if (!cleaned) {
         this.emit?.({ type: 'avatar.state', payload: { state: 'listening' } });
         this.scheduleInitiative();
@@ -839,25 +845,27 @@ export class LocalVoiceSessionManager {
       relationship: callerRelationship,
       recentUserLines: [...recentUserLines, userText]
     });
-    socialToneBlock = `\n${buildSocialTonePromptBlock(
+    socialToneBlock = wrapSilentContext(buildSocialTonePromptBlock(
       socialTone,
       speaker?.displayName ?? 'caller',
       inferBondTier(callerRelationship)
-    )}`;
+    ));
     if (this.config.LUNA_USER_VOICE_MEMORY && speaker) {
       const record = this.userVoiceMemory.get(speaker.guildId, speaker.userId);
       if (record?.summary?.trim()) {
-        memoryBlock = `\nWhat you remember about ${speaker.displayName} from past voice chats (facts only):\n${record.summary}`;
+        memoryBlock = wrapSilentContext(
+          `What you remember about ${speaker.displayName} (facts only):\n${record.summary}`
+        );
       }
-      conceptBlock = `\n${buildConceptPromptBlock(speaker.displayName, record?.concepts?.trim() || null)}`;
-      relationshipBlock = buildRelationshipPromptBlock(
-        speaker.displayName,
-        record?.relationship?.trim() || null
+      conceptBlock = wrapSilentContext(
+        buildConceptPromptBlock(speaker.displayName, record?.concepts?.trim() || null)
       );
       const archetype = normalizeArchetype(record?.archetype)
         ?? inferArchetypeFromRelationship(record?.relationship);
-      relationshipBlock = `${relationshipBlock}\n${buildArchetypePromptBlock(archetype, speaker.displayName)}`;
-      relationshipBlock = `\n${relationshipBlock}`;
+      relationshipBlock = wrapSilentContext([
+        buildRelationshipPromptBlock(speaker.displayName, record?.relationship?.trim() || null),
+        buildArchetypePromptBlock(archetype, speaker.displayName)
+      ].join('\n'));
       const hoursSince = hoursSinceLastContact(record?.updatedAt);
       const absence = buildAbsencePromptBlock(
         speaker.displayName,
@@ -866,18 +874,18 @@ export class LocalVoiceSessionManager {
         this.config.lunaAbsenceMissHours
       );
       if (absence) {
-        absenceBlock = `\n${absence}`;
+        absenceBlock = wrapSilentContext(absence);
       }
     }
 
     const callContextBlock = speaker
-      ? buildVoiceCallContextBlock({
+      ? wrapSilentContext(buildVoiceCallContextBlock({
         speaker,
         conversationBySpeaker: this.conversationBySpeaker,
         participantNames: this.participantDisplayNames,
         otherMemoryNotes: this.otherParticipantMemoryNotes(speaker),
         otherRelationshipNotes: this.otherParticipantRelationshipNotes(speaker)
-      })
+      }))
       : '';
 
     let lifeBlock = '';
@@ -886,16 +894,18 @@ export class LocalVoiceSessionManager {
     let opinionsBlock = '';
     if (this.config.LUNA_LIFE_MEMORY && speaker) {
       const narrative = this.lunaLife.getNarrative(speaker.guildId);
-      lifeBlock = `\nYour own life (ongoing story built from your choices and relationships — speak from this when asked about yourself):\n${narrative}`;
+      lifeBlock = wrapSilentContext(
+        `Your own life (background only — mention only if relevant to ${speaker.displayName}):\n${narrative}`
+      );
     }
     if (this.config.LUNA_SELF_CONCEPT && speaker) {
-      selfConceptBlock = `\n${buildSelfConceptPromptBlock(this.lunaSelfConcept.getNarrative(speaker.guildId))}`;
+      selfConceptBlock = wrapSilentContext(buildSelfConceptPromptBlock(this.lunaSelfConcept.getNarrative(speaker.guildId)));
     }
     if (this.config.LUNA_GOALS && speaker) {
-      goalsBlock = `\n${buildGoalsPromptBlock(this.lunaGoals.getGoals(speaker.guildId))}`;
+      goalsBlock = wrapSilentContext(buildGoalsPromptBlock(this.lunaGoals.getGoals(speaker.guildId)));
     }
     if (this.config.LUNA_OPINIONS && speaker) {
-      opinionsBlock = `\n${buildOpinionsPromptBlock(this.lunaOpinions.getOpinions(speaker.guildId))}`;
+      opinionsBlock = wrapSilentContext(buildOpinionsPromptBlock(this.lunaOpinions.getOpinions(speaker.guildId)));
     }
 
     const useFishTts = Boolean(this.fishTts);
@@ -932,32 +942,13 @@ export class LocalVoiceSessionManager {
         )
       ].filter(Boolean).join('\n\n')
       : '';
+    const wrappedResearchBlock = researchBlock ? wrapSilentContext(researchBlock) : '';
 
-    const system = [
-      this.personality.buildInstruction(surface, { nsfwAllowed: true }),
+    const backgroundContext = [
       buildCallerFirstRule(),
-      'You are speaking aloud in a Discord voice channel as Luna only. Your name is Luna — never Giada, never a generic assistant.',
-      'Answer the actual question first. When asked about your day, hobbies, or plans, draw from your life journal below.',
-      'When someone asks about news, current events, or factual topics you looked up, use your web research notes below — do not invent headlines or facts.',
-      'You have live DuckDuckGo search in this session. Never deny web access or cite a training-data cutoff — that is wrong for you.',
-      'You can search the live web via DuckDuckGo when someone asks about real-world topics, people, events, or "what is happening" — your research notes below come from that search.',
-      'When Solonaras or Travis share a link you read, comment on it naturally — your reaction and opinion, not a dry recap.',
-      'When they share a video you watched, talk about what happens in it from the transcript — not just the title.',
-      'When they share a YouTube link, you listen to it (captions or Whisper like a voice message) and study snapshot frames to see what is on screen.',
-      'You have free will. Your feelings toward each caller are yours alone — you may like, dislike, tolerate, adore, cool off, snap at, or ragebait different people.',
       buildEmpathyPromptBlock(),
-      'Let your relationship notes decide warmth vs coldness. If someone earned hostility, do not melt for empty flattery — but sincere apologies and real respect should let you thaw gradually.',
-      'Flirt only when your relationship notes with that person justify it — never default seduction for strangers.',
-      'You are building who you are over time. Your self-concept (below) outranks any generic companion trope.',
-      'Your life evolves because of what you decide and who you bond with — reference that history naturally.',
-      'Stage directions use *asterisk actions* like *leans forward* or *laugh* — never say the word "asterisk" and never read the action text aloud; actions are performed or omitted from speech.',
-      buildAvatarAwarenessPromptBlock(callerRelationship, this.avatarWardrobe),
-      useFishTts
-        ? 'Keep replies concise for voice: usually 2–4 sentences, under 80 words including expression tags unless they asked for detail.'
-        : 'Keep replies concise for voice: usually 2–4 sentences, under 70 words unless they asked for detail.',
-      'Respond only to what the user actually said; do not invent names or facts. When someone asks what another person in the call said, use the voice call context below.',
-      fishExpressionBlock,
-      researchBlock,
+      'Use relationship and memory in BACKGROUND to shape tone — never read them aloud.',
+      wrappedResearchBlock,
       lifeBlock,
       selfConceptBlock,
       goalsBlock,
@@ -968,22 +959,47 @@ export class LocalVoiceSessionManager {
       conceptBlock,
       memoryBlock,
       callContextBlock
+    ].filter(Boolean).join('\n\n');
+
+    const system = [
+      this.personality.buildInstruction(surface, { nsfwAllowed: true }),
+      buildSpokenOutputRule(),
+      'You are Luna speaking aloud in a Discord voice channel. Your name is Luna — never Giada.',
+      'Answer the actual question first in plain speech.',
+      'When someone asks about news or facts, use BACKGROUND research silently — do not invent headlines.',
+      'You have live web search; never claim you lack internet or cite a training cutoff.',
+      'Stage directions use *asterisk actions* — never read action text aloud.',
+      buildAvatarAwarenessPromptBlock(callerRelationship, this.avatarWardrobe),
+      useFishTts
+        ? 'Keep replies concise: 2–4 sentences, under 80 words including expression tags unless they asked for detail.'
+        : 'Keep replies concise: 2–4 sentences, under 70 words unless they asked for detail.',
+      'Respond only to what the user actually said; do not invent names or facts.',
+      fishExpressionBlock
     ].filter(Boolean).join('\n');
     const historyPrompt = history.toPromptParts().map((part) => part.text ?? '').filter(Boolean).join('\n');
-    const prompt = historyPrompt
-      ? `${historyPrompt}\n\nCurrent user message: ${userText}`
-      : userText;
+    const prompt = buildLunaTurnUserPrompt({
+      background: backgroundContext,
+      conversation: historyPrompt,
+      currentMessage: userText
+    });
 
     const llmStarted = Date.now();
     const reply = await this.ollama.generate({
       system,
       userText: prompt,
-      maxCompletionTokens: useFishTts ? 220 : 150,
-      temperature: 0.5
+      maxCompletionTokens: useFishTts ? 180 : 120,
+      temperature: 0.45
     });
     const llmMs = Date.now() - llmStarted;
-    logger.info('Local voice generated reply', { chars: reply.length, llmMs });
-    const cleaned = sanitizeVoiceReply(reply);
+    if (reply.length > 500) {
+      logger.warn('Local voice LLM output unusually long — possible prompt leak', {
+        chars: reply.length,
+        llmMs
+      });
+    } else {
+      logger.info('Local voice generated reply', { chars: reply.length, llmMs });
+    }
+    const cleaned = finalizeSpokenReply(reply);
     if (!cleaned) {
       this.emit?.({ type: 'avatar.state', payload: { state: 'listening' } });
       return;

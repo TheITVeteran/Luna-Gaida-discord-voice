@@ -41,8 +41,10 @@ export class LiveChatPlugin implements GiadaPlugin {
       memory: this.memory,
       speakTts: async (text, options) => {
         if (this.avatarTts) {
-          await this.avatarTts.speakLine(text, { publish: true, ...options });
-          return true;
+          const result = await this.avatarTts.speakLine(text, { publish: false, ...options });
+          if (result.playbackMs > 0) {
+            return true;
+          }
         }
         if (await this.discord?.speakLiveChatTts(text, options)) {
           return true;

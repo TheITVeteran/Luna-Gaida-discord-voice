@@ -10,6 +10,7 @@ import { applyVoiceActionsToReply, stripRoleplayMarkupForSpeech } from './voiceA
 import { analyzeFishTtsDelivery, buildFishDeliveryContext } from './fishAudioDelivery.js';
 import { LocalVoiceService, resolveLocalVoicePaths } from './localVoiceService.js';
 import {
+  beginAvatarTtsPlayback,
   broadcastLunaTtsAudio,
   lunaTtsPlaybackMs,
   publishLunaTtsAvatarSync,
@@ -117,10 +118,15 @@ export class AvatarTtsService {
       }
       const ttsMs = Date.now() - ttsStarted;
       const discordPcm = await wavToDiscordPcm(this.config.FFMPEG_BINARY, outWav);
-      publishLunaTtsAvatarSync(discordPcm, displayText || ttsText);
-      broadcastLunaTtsAudio(discordPcm);
       const playbackMs = lunaTtsPlaybackMs(discordPcm);
-      await delay(playbackMs);
+      const endAvatarUnmute = beginAvatarTtsPlayback();
+      try {
+        publishLunaTtsAvatarSync(discordPcm, displayText || ttsText);
+        broadcastLunaTtsAudio(discordPcm, { bypassDiscordMute: true });
+        await delay(playbackMs);
+      } finally {
+        endAvatarUnmute();
+      }
       broadcastAvatarEvent({ type: 'avatar.state', payload: { state: 'idle' } });
       return { ttsMs, playbackMs };
     } finally {
